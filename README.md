@@ -42,6 +42,53 @@ Para transmitir: en OBS / TikTok LIVE Studio añade una fuente **Navegador** apu
 - `game.state.items` y `game.state.activeEffects` muestran lo que hay en juego.
 - `game.AI_CONFIG`: qué hace la IA con los items (por defecto esquiva muros y bombas, y busca mega-food y speed).
 
+## Puente TikTok Live (`bridge/`)
+
+```
+node bridge/tiktok-bridge.js                         # modo mock (eventos de prueba cada 3-5 s)
+TIKTOK_USER=usuario node bridge/tiktok-bridge.js     # live real (requiere: cd bridge && npm install)
+```
+
+- Levanta un servidor WebSocket en `ws://localhost:8080`; el juego se conecta solo y reintenta cada 5 s
+  si el puente no está o se cae. Chrome escribe "WebSocket connection ... failed" en la consola en cada
+  intento fallido: es normal mientras el puente esté apagado.
+- **Modo mock**: sin `TIKTOK_USER`, con `--mock`, o si `tiktok-live-connector` no está instalado. Al conectarse
+  el juego manda una secuencia fija (`test1: !team colombia`, una Rosa de `test2`, `test3: !team argentina`)
+  y luego eventos aleatorios.
+- **Con `TIKTOK_USER`**, si la conexión a TikTok falla, reintenta cada 15 s y **no** pasa a mock (para no meter
+  regalos falsos en un directo real).
+- En la terminal del puente se pueden inyectar eventos a mano: `chat test1 !team colombia`,
+  `gift test2 1 5655 Rose`, `like test3 5`, `follow x`, `share x` o un JSON crudo.
+- No usa la dependencia `ws`: trae un servidor WebSocket mínimo propio (solo texto), así el mock funciona sin `npm install`.
+
+### Contrato de eventos puente -> juego
+
+Cada mensaje es un JSON:
+
+```js
+{
+  type: 'gift' | 'like' | 'follow' | 'share' | 'chat',
+  user: string,          // uniqueId de TikTok
+  timestamp: number,     // ms (Date.now() en el puente)
+  diamondCount?: number, // gift: diamantes por unidad
+  giftName?: string,     // gift
+  giftId?: number,       // gift (Rosa = 5655)
+  repeatCount?: number,  // gift: repeticiones en racha (se envía una vez, al terminar la racha)
+  likeCount?: number,    // like
+  message?: string,      // chat
+}
+```
+
+En el juego, `handleTikTokEvent(event)` recibe cada evento. Por ahora solo lo registra en consola y atiende
+los comandos de chat:
+
+- `!team <equipo>`: se une a un equipo del matchup en pantalla (`!team colombia`, `!team arg`, `!team barça`...).
+  Los teams se vacían al cambiar de temática. El HUD muestra `TEAMS [bandera] X vs Y [bandera]`.
+- `!theme <id>`: cambia la temática de la siguiente ronda.
+
+Desde la consola del juego: `game.handleTikTokEvent({type: 'chat', user: 'x', message: '!team colombia'})`,
+`game.getTeamCounts()`, `game.state.teams`.
+
 ## Estado
 
 - [x] Fase 1: motor base (IA BFS, score, auto-restart)

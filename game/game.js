@@ -7,6 +7,7 @@
    - Fase 2: modo PvP (2 serpientes) con rondas ganadas persistentes.
    - Fase 3: temáticas (colores, nombres, banderas dibujadas en canvas), cambio en caliente y rotación automática.
    - Fase 4: items (mega-food, bomba, speed, wall) y velocidad independiente por serpiente.
+   - Fase 5 (base): cliente WebSocket del puente TikTok, dispatcher de eventos y teams por chat (!team).
    ========================================================= */
 
 // ---------- Modo de juego ----------
@@ -68,20 +69,20 @@ const STATS_KEY = 'snakeTikTok.themeStats';
 const THEMES = {
   'colombia-argentina': {
     displayName: 'Colombia vs Argentina',
-    p1: { name: 'COLOMBIA', color: '#ffcd00', innerColor: '#ffe066', headColor: '#fff099', flagId: 'colombia', flagLabel: 'COL' },
-    p2: { name: 'ARGENTINA', color: '#75aadb', innerColor: '#a8ccea', headColor: '#c3dbef', flagId: 'argentina', flagLabel: 'ARG' },
+    p1: { name: 'COLOMBIA', color: '#ffcd00', innerColor: '#ffe066', headColor: '#fff099', flagId: 'colombia', flagLabel: 'COL', aliases: ['colombiano'] },
+    p2: { name: 'ARGENTINA', color: '#75aadb', innerColor: '#a8ccea', headColor: '#c3dbef', flagId: 'argentina', flagLabel: 'ARG', aliases: ['argentino'] },
     background: '#0a0a15',
   },
   'real-barca': {
     displayName: 'Real Madrid vs Barcelona',
-    p1: { name: 'REAL', color: '#ffffff', innerColor: '#f0f0f0', headColor: '#e0e0e0', flagId: 'real', flagLabel: 'RMA' },
-    p2: { name: 'BARÇA', color: '#a50044', innerColor: '#c1005a', headColor: '#d81b60', flagId: 'barca', flagLabel: 'FCB' },
+    p1: { name: 'REAL', color: '#ffffff', innerColor: '#f0f0f0', headColor: '#e0e0e0', flagId: 'real', flagLabel: 'RMA', aliases: ['madrid', 'realmadrid'] },
+    p2: { name: 'BARÇA', color: '#a50044', innerColor: '#c1005a', headColor: '#d81b60', flagId: 'barca', flagLabel: 'FCB', aliases: ['barcelona', 'barsa'] },
     background: '#0a0a15',
   },
   'manzana-naranja': {
     displayName: 'Manzana vs Naranja',
-    p1: { name: 'MANZANA', color: '#e63946', innerColor: '#f28b93', headColor: '#f5a5ab', flagId: 'manzana', flagLabel: 'MZN' },
-    p2: { name: 'NARANJA', color: '#ff8c00', innerColor: '#ffb04d', headColor: '#ffc370', flagId: 'naranja', flagLabel: 'NRJ' },
+    p1: { name: 'MANZANA', color: '#e63946', innerColor: '#f28b93', headColor: '#f5a5ab', flagId: 'manzana', flagLabel: 'MZN', aliases: ['apple'] },
+    p2: { name: 'NARANJA', color: '#ff8c00', innerColor: '#ffb04d', headColor: '#ffc370', flagId: 'naranja', flagLabel: 'NRJ', aliases: ['orange'] },
     background: '#0a0a15',
   },
 };
@@ -90,6 +91,10 @@ const DEFAULT_THEME = 'colombia-argentina';
 const THEME_ROTATION_MS = 20 * 60 * 1000;
 // Duración del cartel "PRÓXIMA RONDA"
 const THEME_BANNER_MS = 2000;
+
+// ---------- Puente TikTok ----------
+const BRIDGE_URL = 'ws://localhost:8080';
+const BRIDGE_RETRY_MS = 5000;
 
 // Orden fijo: arriba, derecha, abajo, izquierda
 const DIRECTIONS = [
@@ -116,6 +121,9 @@ const state = {
   roundTheme: DEFAULT_THEME,    // temática de la ronda en curso (la que se ve en pantalla)
   themeBanner: null,            // { themeId, startedAt } mientras se muestra el cartel de cambio
   lastThemeRotationAt: performance.now(),
+  bridgeConnected: false,       // true mientras hay conexión con el puente de TikTok
+  teams: new Map(),             // username -> 'p1' | 'p2' (se vacía al cambiar de temática)
+  knownUsers: new Set(),        // usuarios vistos en cualquier evento de TikTok (para contar neutrales)
   foods: [],
   items: [],          // { type, x, y, bornAt, expiresAt, meta }
   activeEffects: [],  // { snakeId, type, until }
@@ -713,7 +721,12 @@ function endRound(now) {
 
 function resetGame(now = performance.now()) {
   state.mode = MODE;
-  state.roundTheme = state.currentTheme; // aquí se aplica un cambio de temática pendiente
+  // Aquí se aplica un cambio de temática pendiente. Los teams son de un matchup concreto: si cambia, se vacían.
+  if (state.currentTheme !== state.roundTheme && state.teams.size > 0) {
+    console.info(`[team] nueva temática: se reinician los teams (${state.teams.size} registrados)`);
+    state.teams.clear();
+  }
+  state.roundTheme = state.currentTheme;
   state.round++;
   state.phase = 'playing';
   state.roundResult = null;
@@ -768,17 +781,124 @@ function msUntilThemeRotation(now = performance.now()) {
   return Math.max(0, THEME_ROTATION_MS - (now - state.lastThemeRotationAt));
 }
 
-// Placeholder para el puente de TikTok (Fase 5): "!theme real-barca" en el chat cambia la temática.
-// El id admite guiones ([\w-]+), porque los ids de temática los llevan.
+// Comandos de chat que entiende el juego:
+//   !theme <id>     cambia la temática de la próxima ronda (ids con guiones: [\w-]+)
+//   !team <equipo>  se une a un equipo del matchup actual. Admite acentos y ç (\S+): "!team barça".
+// Devuelve true si el mensaje era un comando y se aplicó.
 function onChatCommand(username, message) {
-  const match = /^!theme\s+([\w-]+)/i.exec(String(message).trim());
-  if (!match) return false;
-  const themeId = match[1].toLowerCase();
-  console.info(`[chat] ${username} pide temática "${themeId}"`);
-  return setTheme(themeId);
+  const text = String(message || '').trim();
+  const themeMatch = /^!theme\s+([\w-]+)/i.exec(text);
+  if (themeMatch) {
+    const themeId = themeMatch[1].toLowerCase();
+    console.info(`[chat] ${username} pide temática "${themeId}"`);
+    return setTheme(themeId);
+  }
+  const teamMatch = /^!team\s+(\S+)/i.exec(text);
+  if (teamMatch) return registerTeam(username, teamMatch[1]) !== null;
+  return false;
 }
 
-// ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
+// ---------- Teams (PvP por equipos de espectadores) ----------
+
+// Minúsculas, sin acentos ni signos: "Barça" -> "barca", "Real-Madrid" -> "realmadrid"
+function normalizeTeamName(name) {
+  return String(name).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// Traduce lo que escribe el espectador a 'p1' | 'p2' según la temática en pantalla, o null si no encaja
+function resolveTeamSlot(teamName, themeId = state.roundTheme) {
+  const wanted = normalizeTeamName(teamName);
+  const theme = THEMES[themeId];
+  for (const slot of ['p1', 'p2']) {
+    const player = theme[slot];
+    const names = [slot, player.name, player.flagLabel, player.flagId, ...(player.aliases || [])];
+    if (names.some((n) => normalizeTeamName(n) === wanted)) return slot;
+  }
+  return null;
+}
+
+// Registra (o cambia) el equipo de un usuario. Devuelve 'p1' | 'p2', o null si el equipo no existe en este matchup.
+function registerTeam(username, teamName) {
+  const theme = THEMES[state.roundTheme];
+  const slot = resolveTeamSlot(teamName);
+  if (!slot) {
+    console.info(`[team] ${username}: "${teamName}" no es un equipo de ${theme.displayName}`);
+    return null;
+  }
+  const previous = state.teams.get(username);
+  state.teams.set(username, slot);
+  state.knownUsers.add(username);
+  const change = previous && previous !== slot ? ` (antes ${theme[previous].name})` : '';
+  console.info(`[team] ${username} -> ${theme[slot].name} (${slot})${change}`);
+  return slot;
+}
+
+// Cuántos espectadores hay en cada equipo; neutral = vistos en algún evento pero sin equipo
+function getTeamCounts() {
+  const counts = { p1: 0, p2: 0, neutral: 0 };
+  for (const slot of state.teams.values()) counts[slot]++;
+  for (const user of state.knownUsers) {
+    if (!state.teams.has(user)) counts.neutral++;
+  }
+  return counts;
+}
+
+// ---------- Puente TikTok: cliente WebSocket ----------
+
+// Conecta con el puente (bridge/tiktok-bridge.js). Si no está o se cae, reintenta cada BRIDGE_RETRY_MS.
+// Nota: Chrome escribe por su cuenta "WebSocket connection ... failed" en la consola en cada intento
+// fallido; eso no se puede silenciar desde JS.
+function connectToBridge() {
+  let socket;
+  try {
+    socket = new WebSocket(BRIDGE_URL);
+  } catch (e) {
+    setTimeout(connectToBridge, BRIDGE_RETRY_MS);
+    return;
+  }
+  socket.onopen = () => {
+    state.bridgeConnected = true;
+    console.info(`[bridge] conectado a ${BRIDGE_URL}`);
+  };
+  socket.onmessage = (msg) => {
+    let event;
+    try {
+      event = JSON.parse(msg.data);
+    } catch (e) {
+      console.warn('[bridge] mensaje que no es JSON:', msg.data);
+      return;
+    }
+    handleTikTokEvent(event);
+  };
+  socket.onclose = () => {
+    if (state.bridgeConnected) console.info(`[bridge] desconectado; reintentando cada ${BRIDGE_RETRY_MS / 1000} s`);
+    state.bridgeConnected = false;
+    setTimeout(connectToBridge, BRIDGE_RETRY_MS);
+  };
+  // onerror siempre va seguido de onclose, que es quien reintenta
+  socket.onerror = () => {};
+}
+
+// Dispatcher de eventos de TikTok (contrato en README). Por ahora solo registra el evento y atiende
+// los comandos de chat; el mapeo de regalos/likes/follows a acciones del juego llega en la Fase 5.
+function handleTikTokEvent(event) {
+  if (!event || typeof event.type !== 'string') {
+    console.warn('[tiktok] evento sin tipo, ignorado:', event);
+    return;
+  }
+  try {
+    const user = event.user || 'anónimo';
+    state.knownUsers.add(user);
+    console.info(`[tiktok] ${event.type} de ${user} (modo ${state.mode})`, event);
+    if (event.type === 'chat') onChatCommand(user, event.message);
+    // Fase 5: aquí va el mapeo según state.mode (SOLO: caos para todos; PVP: por equipos con state.teams)
+  } catch (err) {
+    // Un evento raro nunca debe tumbar el juego
+    console.error('[tiktok] error procesando evento', event, err);
+  }
+}
+
+// ---------- Partículas// ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
 function spawnBurst(x, y, color, count) {
   for (let i = 0; i < count; i++) {
     const angle = Math.random() * Math.PI * 2;
@@ -1402,12 +1522,24 @@ function drawPvpHud() {
       ],
       x, HUD_TOP + 98, 440, 6
     );
-    drawOutlinedText(String(snake.score), x, HUD_TOP + 170, `900 96px ${HUD_FONT}`, snake.color, 10);
+    drawOutlinedText(String(snake.score), x, HUD_TOP + 160, `900 84px ${HUD_FONT}`, snake.color, 9);
   }
-  drawOutlinedText('VS', cx, HUD_TOP + 135, `900 48px ${HUD_FONT}`, 'rgba(255,255,255,0.55)', 6);
+  drawOutlinedText('VS', cx, HUD_TOP + 130, `900 48px ${HUD_FONT}`, 'rgba(255,255,255,0.55)', 6);
 
   const scoreLine = `MARCADOR: ${p1.name} ${stats.p1Wins} - ${stats.p2Wins} ${p2.name}  ·  EMPATES: ${stats.draws}  ·  RONDA ${state.round}`;
-  drawOutlinedText(scoreLine, cx, HUD_TOP + 235, fitFont(scoreLine, 'bold', 28, 1040), 'rgba(255,255,255,0.75)', 5);
+  drawOutlinedText(scoreLine, cx, HUD_TOP + 218, fitFont(scoreLine, 'bold', 26, 1040), 'rgba(255,255,255,0.75)', 5);
+
+  // Espectadores en cada equipo (comando !team en el chat)
+  const teams = getTeamCounts();
+  drawRichRow(
+    [
+      { text: 'TEAMS  ', weight: 'bold', size: 26, color: 'rgba(255,255,255,0.6)' },
+      { flagId: p1.flagId, size: 30 },
+      { text: `  ${teams.p1}  vs  ${teams.p2}  `, weight: 'bold', size: 26, color: '#ffffff' },
+      { flagId: p2.flagId, size: 30 },
+    ],
+    cx, HUD_TOP + 250, 1040, 5
+  );
   ctx.restore();
 }
 
@@ -1485,7 +1617,8 @@ function drawDebug() {
   ctx.save();
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  drawOutlinedText(`render ${perf.fps} fps · lógica ${perf.tps} tps`, 20, CANVAS_HEIGHT - 70, 'bold 34px monospace', '#00e5ff', 6);
+  const bridge = state.bridgeConnected ? 'puente OK' : 'sin puente';
+  drawOutlinedText(`render ${perf.fps} fps · lógica ${perf.tps} tps · ${bridge}`, 20, CANVAS_HEIGHT - 70, 'bold 30px monospace', '#00e5ff', 6);
   ctx.restore();
 }
 
@@ -1571,11 +1704,14 @@ window.addEventListener('keydown', (e) => {
 // Acceso desde la consola del navegador para pruebas:
 //   game.state, game.resetGame(), game.setTheme('real-barca'),
 //   game.onChatCommand('usuario', '!theme manzana-naranja'), game.msUntilThemeRotation(),
-//   game.spawnItem('BOMB'), game.spawnItem('WALL', 5, 10), game.AI_CONFIG.avoidBombs = false
+//   game.spawnItem('BOMB'), game.spawnItem('WALL', 5, 10), game.AI_CONFIG.avoidBombs = false,
+//   game.handleTikTokEvent({type: 'chat', user: 'x', message: '!team colombia'}), game.getTeamCounts()
 window.game = {
   state, resetGame, tick, setTheme, onChatCommand, msUntilThemeRotation, spawnItem,
+  handleTikTokEvent, registerTeam, getTeamCounts,
   THEMES, FLAG_RENDERERS, ITEM_TYPES, AI_CONFIG,
 };
 
 resetGame();
 requestAnimationFrame(frame);
+connectToBridge();

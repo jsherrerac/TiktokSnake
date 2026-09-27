@@ -1,0 +1,17 @@
+{
+  "name": "snake-tiktok-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Puente TikTok Live -> WebSocket local (ws://localhost:8080) para el juego Snake",
+  "main": "tiktok-bridge.js",
+  "scripts": {
+    "start": "node tiktok-bridge.js",
+    "mock": "node tiktok-bridge.js --mock"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "tiktok-live-connector": "^1.2.3"
+  }
+}
