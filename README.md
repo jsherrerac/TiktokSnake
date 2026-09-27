@@ -44,6 +44,15 @@ Para transmitir: en OBS / TikTok LIVE Studio añade una fuente **Navegador** apu
   Muros y bombas solo los ve a `BOMB_VISION_RADIUS` (3) casillas o menos, y si están pegados a la cabeza
   no reacciona con probabilidad `BOMB_MISS_CHANCE` (0.30). `avoidWalls` / `avoidBombs` a `false` los apaga del todo.
 
+### Victory dance
+
+- **PVP**: cuando una serpiente queda sola, gana la ronda y sigue jugando 3 s. Si entonces tiene 30 puntos o más,
+  baila 10 s (espiral, cuadrado, corazón, infinito o zigzag al azar) y luego sale "¡GANA X!"; con menos de 30,
+  la ronda se cierra sin danza. Si choca en esos 3 s o durante la danza, gana igual.
+- **SOLO**: al llegar a 100 puntos baila y la ronda se cierra con "¡100 PUNTOS! 🏆".
+- Consola: `game.triggerVictoryDance(game.state.snakes[0], 'heart')`. Umbrales en `VICTORY_MIN_SCORE`,
+  `VICTORY_RIVAL_DEAD_MS` y `DANCE_DURATION_MS`.
+
 ## Puente TikTok Live (`bridge/`)
 
 ```
@@ -101,4 +110,4 @@ Desde la consola del juego: `game.handleTikTokEvent({type: 'chat', user: 'x', me
 - [x] Fase 3: temáticas (banderas en canvas, HUD bajo la barra de TikTok)
 - [x] Fase 4: items
 - [ ] Fase 5: puente TikTok Live
-- [ ] Fase 6: victory dance
+- [x] Fase 6: victory dance

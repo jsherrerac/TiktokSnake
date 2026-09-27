@@ -8,6 +8,7 @@
    - Fase 3: temáticas (colores, nombres, banderas dibujadas en canvas), cambio en caliente y rotación automática.
    - Fase 4: items (mega-food, bomba, speed, wall) y velocidad independiente por serpiente.
    - Fase 5 (base): cliente WebSocket del puente TikTok, dispatcher de eventos y teams por chat (!team).
+   - Fase 6: victory dance (la ganadora dibuja una figura con el cuerpo antes de cerrar la ronda).
    ========================================================= */
 
 // ---------- Modo de juego ----------
@@ -96,6 +97,17 @@ const THEME_ROTATION_MS = 20 * 60 * 1000;
 // Duración del cartel "PRÓXIMA RONDA"
 const THEME_BANNER_MS = 2000;
 
+// ---------- Victory dance ----------
+// PVP: la rival debe llevar muerta más de VICTORY_RIVAL_DEAD_MS y la superviviente tener VICTORY_MIN_SCORE.PVP.
+// SOLO: basta con llegar a VICTORY_MIN_SCORE.SOLO (celebración de hito).
+const VICTORY_RIVAL_DEAD_MS = 3000;
+const VICTORY_MIN_SCORE = { PVP: 30, SOLO: 100 };
+const DANCE_DURATION_MS = 10000;
+const DANCE_PATTERNS = ['spiral', 'square', 'heart', 'infinity', 'zigzag'];
+const DANCE_PATTERN_LABELS = { spiral: 'ESPIRAL', square: 'CUADRADO', heart: 'CORAZÓN', infinity: 'INFINITO', zigzag: 'ZIGZAG' };
+const DANCE_TRAIL_FADE_MS = 8000; // lo que tardan en desvanecerse los puntos dorados de los waypoints visitados
+const GOLD = '#ffd700';
+
 // ---------- Puente TikTok ----------
 const BRIDGE_URL = 'ws://localhost:8080';
 const BRIDGE_RETRY_MS = 5000;
@@ -117,7 +129,7 @@ canvas.height = CANVAS_HEIGHT;
 // ---------- Estado global del juego ----------
 const state = {
   mode: MODE,         // modo de la ronda en curso (se fija en resetGame)
-  phase: 'playing',   // 'playing' | 'dead'
+  phase: 'playing',   // 'playing' | 'dancing' | 'dead'
   snakes: [],
   roundResult: null,  // PvP: { winner: snake } o { winner: null } si fue empate
   stats: loadStats(), // PvP: { [themeId]: { p1Wins, p2Wins, draws } }, persistente
@@ -134,6 +146,10 @@ const state = {
   particles: [],
   deathAt: 0,
   roundStartedAt: 0,
+  now: 0,               // timestamp del frame en curso
+  pendingWinner: null,  // PVP: la que queda sola gana, aunque la ronda aún no se haya cerrado
+  danceTriggered: false, // la danza ya se lanzó en esta ronda (solo una vez por ronda)
+  dance: null,          // { snakeId, pattern, startedAt, visited: [{ x, y, at }] }
   round: 0,
   bestScore: loadBestScore(),
   debug: false,
@@ -217,6 +233,11 @@ function createSnake(id, startX, startY, dir) {
     moves: 0,              // movimientos totales en la ronda (sirve para medir la velocidad real)
     tickInterval: TICK_MS, // ms entre movimientos; SPEED lo reduce
     moveAccumulator: 0,    // ms acumulados desde el último movimiento
+    deathTimestamp: null,  // cuándo murió (para la condición de victoria inminente)
+    dancing: false,        // true mientras hace la victory dance (la IA normal se apaga)
+    danceWaypoints: [],
+    danceIndex: 0,
+    danceBudget: null,     // pasos que le quedan para alcanzar el waypoint actual antes de saltarlo
     name: config.name,
     color: config.color,
     innerColor: config.innerColor,
@@ -514,6 +535,12 @@ function moveSnake(snake, now) {
   if (snake.growPending > 0) snake.growPending--;
   else snake.body.pop();
   snake.moved = true;
+
+  if (snake.dancing) {
+    advanceDanceProgress(snake, now);
+    // Partículas doradas cada 3 movimientos
+    if (snake.moves % 3 === 0) spawnBurst(cellCenterX(next.x), cellCenterY(next.y), GOLD, 8);
+  }
 }
 
 // Aplica el item que haya en la celda de la cabeza (si hay alguno)
@@ -542,11 +569,11 @@ function collectItemAt(snake, cell, now) {
     // La bomba queda un momento como decoración (onda expansiva) y luego desaparece
     item.meta.detonatedAt = now;
     item.expiresAt = now + def.decorationMs;
-    killSnake(snake);
+    killSnake(snake, now);
     spawnBurst(px, py, def.color, 60);
     console.info(`[item] BOMB mata a ${snake.name} en (${cell.x},${cell.y})`);
   } else if (item.type === 'WALL') {
-    killSnake(snake);
+    killSnake(snake, now);
     console.info(`[item] WALL mata a ${snake.name} en (${cell.x},${cell.y})`);
   }
 }
@@ -557,7 +584,7 @@ function stepSnakes(movers, now) {
 
   // 1) Todas las IA del grupo deciden con el mismo estado del mapa
   for (const snake of movers) {
-    snake.dir = decideDirection(snake, movers);
+    snake.dir = snake.dancing ? decideDirectionDance(snake) : decideDirection(snake, movers);
   }
 
   // 2) Movimiento, comida e items
@@ -570,8 +597,10 @@ function stepSnakes(movers, now) {
   // - Dos cabezas en la misma celda en el mismo paso: esa celda tiene 2 -> mueren las dos.
   // - Cruce de cabezas (se intercambian celdas): cada cabeza cae sobre el cuello de la otra -> mueren las dos.
   // - Serpientes a distinta velocidad: la que entra en la celda donde ya está la otra es la que choca.
+  // Durante la danza, los cuerpos muertos (que se están desvaneciendo) ya no cuentan como obstáculo.
   const occupancy = new Uint8Array(CELL_COUNT);
   for (const snake of state.snakes) {
+    if (!snake.alive && state.phase === 'dancing') continue;
     for (const c of snake.body) {
       if (inBounds(c.x, c.y)) occupancy[cellIndex(c.x, c.y)]++;
     }
@@ -580,17 +609,90 @@ function stepSnakes(movers, now) {
     if (!snake.alive) continue; // ya murió por un item
     const h = snake.body[0];
     if (!inBounds(h.x, h.y) || occupancy[cellIndex(h.x, h.y)] > 1) {
-      killSnake(snake);
+      killSnake(snake, now);
     }
   }
 
   // 4) Reponer comida
   refillFoods(now);
 
-  // 5) Fin de ronda: SOLO cuando no queda ninguna viva; PVP cuando queda 1 o ninguna
-  const aliveCount = state.snakes.filter((s) => s.alive).length;
-  const minAlive = state.mode === 'PVP' ? 1 : 0;
-  if (aliveCount <= minAlive) endRound(now);
+  // 5) Si en este paso quedó una sola viva, esa gana (el cierre de la ronda lo decide updateRoundStatus)
+  lockWinnerIfDecided();
+}
+
+// La ronda está en juego (normal o con la danza en curso)
+function isRoundActive() {
+  return state.phase === 'playing' || state.phase === 'dancing';
+}
+
+// ¿Se mueve esta serpiente ahora? Durante la danza solo se mueve la que baila; las demás miran.
+function canMove(snake) {
+  return snake.alive && (state.phase !== 'dancing' || snake.dancing);
+}
+
+// PVP: cuando queda una sola viva, esa es la ganadora de la ronda (se fija una vez)
+function lockWinnerIfDecided() {
+  if (state.mode !== 'PVP' || state.pendingWinner) return;
+  const alive = state.snakes.filter((s) => s.alive);
+  if (alive.length !== 1) return;
+  state.pendingWinner = alive[0];
+  console.info(`[ronda ${state.round}] ${alive[0].name} queda sola y gana; ${VICTORY_RIVAL_DEAD_MS / 1000} s antes de cerrar`);
+}
+
+// Decide cada frame si la ronda sigue, si arranca la danza o si se cierra.
+// - PVP: al quedar una sola, sigue jugando VICTORY_RIVAL_DEAD_MS. Si entonces tiene VICTORY_MIN_SCORE.PVP,
+//   baila; si no, la ronda se cierra normal. Si choca antes, gana igual (fue la última en pie).
+// - SOLO: al llegar a VICTORY_MIN_SCORE.SOLO baila; si muere, la ronda se cierra.
+// - Danza: se cierra al completar los waypoints, a los DANCE_DURATION_MS o si la que baila choca.
+function updateRoundStatus(now) {
+  if (!isRoundActive()) return;
+  // Una muerte hecha a mano desde la consola (alive = false) no pasa por killSnake: le ponemos la hora aquí
+  for (const snake of state.snakes) {
+    if (!snake.alive && snake.deathTimestamp === null) snake.deathTimestamp = now;
+  }
+  lockWinnerIfDecided();
+
+  if (state.phase === 'dancing') {
+    const dancer = state.snakes.find((s) => s.dancing);
+    if (!dancer || !dancer.alive) {
+      console.info('[danza] la serpiente chocó: la danza termina antes de tiempo');
+      endRound(now);
+    } else if (dancer.danceIndex >= dancer.danceWaypoints.length) {
+      console.info(`[danza] figura completa en ${((now - state.dance.startedAt) / 1000).toFixed(1)} s`);
+      endRound(now);
+    } else if (now - state.dance.startedAt >= DANCE_DURATION_MS) {
+      console.info(`[danza] ${DANCE_DURATION_MS / 1000} s cumplidos (waypoint ${dancer.danceIndex}/${dancer.danceWaypoints.length})`);
+      endRound(now);
+    }
+    return;
+  }
+
+  const alive = state.snakes.filter((s) => s.alive);
+  if (alive.length === 0) {
+    endRound(now);
+    return;
+  }
+  const candidate = state.mode === 'PVP' ? (alive.length === 1 ? alive[0] : null) : alive[0];
+  if (!candidate) return;
+  if (!state.danceTriggered && checkVictoryInminent(candidate, now)) {
+    triggerVictoryDance(candidate, undefined, now);
+    return;
+  }
+  if (state.mode === 'PVP') {
+    const rival = state.snakes.find((s) => s !== candidate);
+    if (now - rival.deathTimestamp > VICTORY_RIVAL_DEAD_MS) endRound(now);
+  }
+}
+
+// ¿Cumple `snake` la condición de victoria inminente?
+function checkVictoryInminent(snake, now = state.now) {
+  if (!snake || !snake.alive || snake.dancing) return false;
+  if (state.mode === 'PVP') {
+    const rival = state.snakes.find((s) => s !== snake);
+    if (!rival || rival.alive || rival.deathTimestamp === null) return false;
+    return now - rival.deathTimestamp > VICTORY_RIVAL_DEAD_MS && snake.score >= VICTORY_MIN_SCORE.PVP;
+  }
+  return snake.score >= VICTORY_MIN_SCORE.SOLO;
 }
 
 // Mueve a todas las serpientes vivas a la vez (atajo para pruebas desde consola)
@@ -601,8 +703,8 @@ function tick(now = performance.now()) {
 // Avanza la lógica según el tiempo acumulado de cada serpiente. Primero se mueve la más atrasada;
 // las que coinciden (diferencia < 1 ms) se mueven en el mismo paso.
 function advanceSnakes(now) {
-  for (let guard = 0; guard < 32 && state.phase === 'playing'; guard++) {
-    const ready = state.snakes.filter((s) => s.alive && s.moveAccumulator >= s.tickInterval);
+  for (let guard = 0; guard < 32 && isRoundActive(); guard++) {
+    const ready = state.snakes.filter((s) => canMove(s) && s.moveAccumulator >= s.tickInterval);
     if (ready.length === 0) break;
     const lateness = (s) => s.moveAccumulator - s.tickInterval;
     const maxLate = Math.max(...ready.map(lateness));
@@ -690,8 +792,9 @@ function expireItems(now) {
   for (const effect of expired) endEffect(effect);
 }
 
-function killSnake(snake) {
+function killSnake(snake, now = state.now) {
   snake.alive = false;
+  snake.deathTimestamp = now;
   // Congelamos la serpiente en su última posición válida (no dentro de la pared)
   snake.body = snake.prevBody;
   snake.moved = false;
@@ -713,22 +816,24 @@ function endRound(now) {
   const seconds = ((now - state.roundStartedAt) / 1000).toFixed(1);
   const scores = state.snakes.map((s) => `${s.name} ${s.score}`).join(' - ');
 
+  const danced = state.dance !== null;
   if (state.mode === 'PVP') {
+    // Gana la última en pie (fijada al quedar sola, aunque luego chocara) o la que bailó; si no, empate
     const survivors = state.snakes.filter((s) => s.alive);
-    const winner = survivors.length === 1 ? survivors[0] : null;
-    state.roundResult = { winner };
+    const winner = state.pendingWinner || (survivors.length === 1 ? survivors[0] : null);
+    state.roundResult = { winner, danced };
     const s = getThemeStats(state.roundTheme);
     if (winner) s[`${winner.id}Wins`]++;
     else s.draws++;
     saveStats(state.stats);
     const [p1, p2] = state.snakes;
     console.info(
-      `[ronda ${state.round}] ${winner ? `GANA ${winner.name}` : 'EMPATE'} · puntos ${scores} · ${seconds}s` +
+      `[ronda ${state.round}] ${winner ? `GANA ${winner.name}` : 'EMPATE'}${danced ? ` (con danza ${state.dance.pattern})` : ''} · puntos ${scores} · ${seconds}s` +
         ` · total ${p1.name} ${s.p1Wins} - ${s.p2Wins} ${p2.name}, empates ${s.draws}`
     );
   } else {
-    state.roundResult = null;
-    console.info(`[ronda ${state.round}] fin · puntos ${scores} · ${seconds}s`);
+    state.roundResult = { winner: null, danced };
+    console.info(`[ronda ${state.round}] fin${danced ? ` (con danza ${state.dance.pattern})` : ''} · puntos ${scores} · ${seconds}s`);
   }
 }
 
@@ -744,6 +849,9 @@ function resetGame(now = performance.now()) {
   state.phase = 'playing';
   state.roundResult = null;
   state.roundStartedAt = now;
+  state.pendingWinner = null;
+  state.danceTriggered = false;
+  state.dance = null;
   state.foods = [];
   state.items = [];
   state.activeEffects = [];
@@ -760,6 +868,294 @@ function resetGame(now = performance.now()) {
     state.snakes = [createSnake('p1', Math.floor(COLS / 2), midRow, DIRECTIONS[0])];
   }
   refillFoods(now);
+}
+
+// ---------- Victory dance ----------
+
+// Celda dentro del mapa más cercana a (x, y)
+function clampCell(p) {
+  return {
+    x: Math.max(0, Math.min(COLS - 1, Math.round(p.x))),
+    y: Math.max(0, Math.min(ROWS - 1, Math.round(p.y))),
+  };
+}
+
+// Convierte puntos sueltos (pueden estar fuera del mapa o separados) en un camino de celdas contiguas
+// (4-conexo) dentro del mapa, sin retrocesos A,B,A (la serpiente no puede dar media vuelta).
+function toContiguousPath(points) {
+  const path = [];
+  for (const raw of points) {
+    const target = clampCell(raw);
+    if (path.length === 0) {
+      path.push(target);
+      continue;
+    }
+    let cur = path[path.length - 1];
+    while (cur.x !== target.x || cur.y !== target.y) {
+      const dx = target.x - cur.x;
+      const dy = target.y - cur.y;
+      cur = Math.abs(dx) >= Math.abs(dy) ? { x: cur.x + Math.sign(dx), y: cur.y } : { x: cur.x, y: cur.y + Math.sign(dy) };
+      path.push(cur);
+    }
+  }
+  const clean = [];
+  for (const c of path) {
+    const n = clean.length;
+    if (n >= 2 && clean[n - 2].x === c.x && clean[n - 2].y === c.y) {
+      clean.pop();
+      continue;
+    }
+    clean.push(c);
+  }
+  return clean;
+}
+
+// Espiral cuadrada de dentro hacia afuera: derecha, arriba, izquierda, abajo, con tramos crecientes.
+// Los brazos van separados 2 celdas para que la figura se lea (no quede un bloque macizo).
+function generateSpiralPattern(centerX, centerY, size) {
+  const half = Math.floor(size / 2);
+  const dirs = [[1, 0], [0, -1], [-1, 0], [0, 1]];
+  const points = [{ x: centerX, y: centerY }];
+  let x = centerX;
+  let y = centerY;
+  let run = 2;
+  for (let turn = 0; ; turn++) {
+    const [dx, dy] = dirs[turn % 4];
+    const nx = x + dx * run;
+    const ny = y + dy * run;
+    if (Math.abs(nx - centerX) > half || Math.abs(ny - centerY) > half) break;
+    x = nx;
+    y = ny;
+    points.push({ x, y });
+    if (turn % 2 === 1) run += 2;
+  }
+  return toContiguousPath(points);
+}
+
+// Cuadrado hueco: el perímetro de un cuadrado de `size` celdas de lado centrado en (centerX, centerY)
+// (el centro puede ser x.5 si el lado es par)
+function generateSquarePattern(centerX, centerY, size) {
+  const h = (size - 1) / 2;
+  return toContiguousPath([
+    { x: centerX - h, y: centerY - h },
+    { x: centerX + h, y: centerY - h },
+    { x: centerX + h, y: centerY + h },
+    { x: centerX - h, y: centerY + h },
+    { x: centerX - h, y: centerY - h },
+  ]);
+}
+
+// Corazón con la curva paramétrica clásica (x = 16 sin³t, y = 13 cos t - 5 cos 2t - 2 cos 3t - cos 4t),
+// centrado verticalmente y escalado a `scale` celdas de medio ancho.
+function generateHeartPattern(centerX, centerY, scale) {
+  const points = [];
+  const samples = 160;
+  for (let i = 0; i <= samples; i++) {
+    const t = (i / samples) * Math.PI * 2;
+    const hx = 16 * Math.sin(t) ** 3;
+    const hy = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+    // hy va de -17 a ~12: se centra restando su punto medio (-2.5); y del canvas crece hacia abajo
+    points.push({ x: centerX + (hx / 16) * scale, y: centerY - ((hy + 2.5) / 16) * scale });
+  }
+  return toContiguousPath(points);
+}
+
+// Infinito (lemniscata de Bernoulli), algo estirado en vertical para que los lazos se lean en el grid
+function generateInfinityPattern(centerX, centerY, scale) {
+  const points = [];
+  const samples = 160;
+  for (let i = 0; i <= samples; i++) {
+    const t = (i / samples) * Math.PI * 2;
+    const den = 1 + Math.sin(t) ** 2;
+    points.push({
+      x: centerX + (scale * Math.cos(t)) / den,
+      y: centerY + (1.6 * scale * Math.sin(t) * Math.cos(t)) / den,
+    });
+  }
+  return toContiguousPath(points);
+}
+
+// Zigzag horizontal que barre un área: filas de izquierda a derecha y vuelta, separadas 2 celdas
+function generateZigzagPattern(startX, startY, width, height) {
+  const points = [];
+  let leftToRight = true;
+  for (let y = startY; y <= startY + height; y += 2) {
+    points.push({ x: leftToRight ? startX : startX + width, y });
+    points.push({ x: leftToRight ? startX + width : startX, y });
+    leftToRight = !leftToRight;
+  }
+  return toContiguousPath(points);
+}
+
+// Centro real del mapa: con 20x26 celdas cae entre celdas (9.5, 12.5); las figuras simétricas lo usan
+// para no quedar corridas media celda. La espiral necesita una celda concreta de arranque.
+const MAP_CENTER_X = (COLS - 1) / 2;
+const MAP_CENTER_Y = (ROWS - 1) / 2;
+const DANCE_PATTERN_GENERATORS = {
+  spiral: () => generateSpiralPattern(Math.floor(COLS / 2), Math.floor(ROWS / 2), 16),
+  square: () => generateSquarePattern(MAP_CENTER_X, MAP_CENTER_Y, 16),
+  heart: () => generateHeartPattern(MAP_CENTER_X, MAP_CENTER_Y, 8.5),
+  infinity: () => generateInfinityPattern(MAP_CENTER_X, MAP_CENTER_Y, 8.5),
+  zigzag: () => generateZigzagPattern(2, 5, COLS - 5, 14),
+};
+// Figuras cerradas: se recorren 2 veces y empiezan por el punto más cercano a la cabeza
+const CLOSED_DANCE_PATTERNS = ['square', 'heart', 'infinity'];
+
+function manhattan(a, b) {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+// Waypoints de la figura, adaptados a dónde está la serpiente
+function buildDanceWaypoints(pattern, head) {
+  let path = DANCE_PATTERN_GENERATORS[pattern]();
+  if (CLOSED_DANCE_PATTERNS.includes(pattern)) {
+    // Quita el punto repetido del cierre, rota el lazo para empezar cerca de la cabeza y da 2 vueltas
+    const loop = manhattan(path[0], path[path.length - 1]) === 0 ? path.slice(0, -1) : path;
+    let start = 0;
+    loop.forEach((c, i) => {
+      if (manhattan(c, head) < manhattan(loop[start], head)) start = i;
+    });
+    const rotated = loop.slice(start).concat(loop.slice(0, start));
+    path = rotated.concat(rotated, [rotated[0]]);
+  } else if (pattern === 'zigzag' && manhattan(path[path.length - 1], head) < manhattan(path[0], head)) {
+    path = path.slice().reverse(); // el zigzag puede empezar por cualquiera de sus extremos
+  }
+  return path;
+}
+
+// Arranca la victory dance de `snake`. Sin patrón (o con uno desconocido), elige uno al azar.
+function triggerVictoryDance(snake, patternName, now = state.now) {
+  if (!snake || !snake.alive || !isRoundActive()) {
+    console.warn('[danza] solo puede bailar una serpiente viva con la ronda en juego');
+    return false;
+  }
+  let pattern = patternName;
+  if (!DANCE_PATTERN_GENERATORS[pattern]) {
+    if (patternName !== undefined) console.warn(`[danza] patrón "${patternName}" no existe; se elige uno al azar`);
+    pattern = DANCE_PATTERNS[Math.floor(Math.random() * DANCE_PATTERNS.length)];
+  }
+  // Si ya había otra bailando (llamada manual), deja de bailar
+  for (const other of state.snakes) other.dancing = false;
+
+  snake.dancing = true;
+  snake.danceWaypoints = buildDanceWaypoints(pattern, snake.body[0]);
+  snake.danceIndex = 0;
+  snake.danceBudget = null;
+  state.phase = 'dancing';
+  state.danceTriggered = true;
+  state.dance = { snakeId: snake.id, pattern, startedAt: now, visited: [] };
+  if (state.mode === 'PVP') state.pendingWinner = snake;
+  // Las demás se quedan quietas mirando (sin interpolar movimiento)
+  for (const other of state.snakes) {
+    if (other !== snake) other.moved = false;
+  }
+  console.info(`[danza] ${snake.name} baila "${pattern}" (${snake.danceWaypoints.length} waypoints, máx ${DANCE_DURATION_MS / 1000} s)`);
+  return true;
+}
+
+// Marca como visitados los waypoints que la cabeza ya alcanzó
+function advanceDanceProgress(snake, now) {
+  const head = snake.body[0];
+  const wps = snake.danceWaypoints;
+  while (snake.danceIndex < wps.length && manhattan(wps[snake.danceIndex], head) === 0) {
+    state.dance.visited.push({ x: head.x, y: head.y, at: now });
+    snake.danceIndex++;
+    snake.danceBudget = null;
+  }
+}
+
+// Obstáculos para la que baila: su cuerpo (menos la cola si no crece), otras vivas, muros y bombas.
+// Los cuerpos muertos no cuentan: se están desvaneciendo.
+function buildDanceBlockedGrid(snake) {
+  const blocked = new Uint8Array(CELL_COUNT);
+  for (const item of state.items) {
+    if (item.type === 'WALL' || (item.type === 'BOMB' && !item.meta.detonatedAt)) blocked[cellIndex(item.x, item.y)] = 1;
+  }
+  for (const other of state.snakes) {
+    if (!other.alive) continue;
+    const len = other.body.length;
+    const tailFree = other === snake && other.growPending === 0;
+    for (let i = 0; i < len; i++) {
+      if (tailFree && i === len - 1) continue;
+      blocked[cellIndex(other.body[i].x, other.body[i].y)] = 1;
+    }
+  }
+  return blocked;
+}
+
+// BFS desde la cabeza hasta la celda `target`. Devuelve la primera dirección del camino o null si no se llega.
+function bfsStepTowards(head, target, blocked, firstDirs) {
+  const goal = cellIndex(target.x, target.y);
+  const visited = new Uint8Array(CELL_COUNT);
+  const firstDir = new Int8Array(CELL_COUNT);
+  const queue = new Int32Array(CELL_COUNT);
+  let qHead = 0;
+  let qTail = 0;
+  visited[cellIndex(head.x, head.y)] = 1;
+  for (const d of firstDirs) {
+    const nx = head.x + d.x;
+    const ny = head.y + d.y;
+    if (!inBounds(nx, ny)) continue;
+    const n = cellIndex(nx, ny);
+    if (blocked[n] || visited[n]) continue;
+    if (n === goal) return d;
+    visited[n] = 1;
+    firstDir[n] = DIRECTIONS.indexOf(d);
+    queue[qTail++] = n;
+  }
+  while (qHead < qTail) {
+    const c = queue[qHead++];
+    const cx = c % COLS;
+    const cy = (c - cx) / COLS;
+    for (let k = 0; k < 4; k++) {
+      const nx = cx + DIRECTIONS[k].x;
+      const ny = cy + DIRECTIONS[k].y;
+      if (!inBounds(nx, ny)) continue;
+      const n = cellIndex(nx, ny);
+      if (blocked[n] || visited[n]) continue;
+      if (n === goal) return DIRECTIONS[firstDir[c]];
+      visited[n] = 1;
+      firstDir[n] = firstDir[c];
+      queue[qTail++] = n;
+    }
+  }
+  return null;
+}
+
+// Dirección durante la danza: el camino más corto (BFS) al waypoint actual, rodeando su propio cuerpo,
+// muros y bombas. Se salta el waypoint si está tapado, si no hay camino, si ir hacia él la encerraría
+// (queda menos espacio libre que su largo) o si no lo alcanza en un número razonable de pasos.
+// Sin waypoints alcanzables, se mueve a donde tenga más espacio (el cierre lo decide updateRoundStatus).
+// Si ninguna dirección es segura, choca y la danza termina.
+function decideDirectionDance(snake) {
+  const head = snake.body[0];
+  const wps = snake.danceWaypoints;
+  const blocked = buildDanceBlockedGrid(snake);
+  const options = DIRECTIONS.filter((d) => !isOpposite(d, snake.dir));
+
+  while (snake.danceIndex < wps.length) {
+    const wp = wps[snake.danceIndex];
+    if (snake.danceBudget === null) snake.danceBudget = manhattan(wp, head) * 2 + 6;
+    const reachable = !blocked[cellIndex(wp.x, wp.y)] && snake.danceBudget-- > 0;
+    const dir = reachable ? bfsStepTowards(head, wp, blocked, options) : null;
+    if (dir && floodFillArea(head.x + dir.x, head.y + dir.y, blocked) >= snake.body.length) return dir;
+    snake.danceIndex++;
+    snake.danceBudget = null;
+  }
+
+  let best = options[0];
+  let bestArea = -1;
+  for (const d of options) {
+    const nx = head.x + d.x;
+    const ny = head.y + d.y;
+    if (!inBounds(nx, ny) || blocked[cellIndex(nx, ny)]) continue;
+    const area = floodFillArea(nx, ny, blocked);
+    if (area > bestArea) {
+      bestArea = area;
+      best = d;
+    }
+  }
+  return best;
 }
 
 // ---------- Temáticas: cambio en caliente ----------
@@ -1202,15 +1598,35 @@ function drawItems(now) {
   }
 }
 
+// Mezcla dos colores #rrggbb (k = 0 -> a, k = 1 -> b)
+function mixColor(a, b, k) {
+  const pa = parseInt(a.slice(1), 16);
+  const pb = parseInt(b.slice(1), 16);
+  const ch = (shift) => Math.round(((pa >> shift) & 255) * (1 - k) + ((pb >> shift) & 255) * k);
+  return `rgb(${ch(16)}, ${ch(8)}, ${ch(0)})`;
+}
+
 function drawSnake(snake, t, now) {
   const points = getSnakePoints(snake, t);
   if (points.length === 0) return;
 
   ctx.save();
-  // Serpiente muerta: parpadea en rojo durante el countdown
-  if (!snake.alive) ctx.globalAlpha = Math.floor(now / 200) % 2 === 0 ? 1 : 0.35;
-  const color = snake.alive ? snake.color : '#ff3355';
-  const inner = snake.alive ? snake.innerColor : '#ff9aaa';
+  if (!snake.alive && state.dance) {
+    // Tras una danza, la serpiente muerta se desvanece a lo largo de los 10 s
+    const fade = 1 - (now - state.dance.startedAt) / DANCE_DURATION_MS;
+    if (fade <= 0) {
+      ctx.restore();
+      return;
+    }
+    ctx.globalAlpha = fade;
+  } else if (!snake.alive) {
+    // Serpiente muerta: parpadea en rojo
+    ctx.globalAlpha = Math.floor(now / 200) % 2 === 0 ? 1 : 0.35;
+  }
+  // Bailando: el color late entre el suyo y blanco brillante
+  const pulse = snake.dancing ? 0.5 + 0.5 * Math.sin(now / 110) : 0;
+  const color = !snake.alive ? '#ff3355' : snake.dancing ? mixColor(snake.color, '#ffffff', 0.85 * pulse) : snake.color;
+  const inner = !snake.alive ? '#ff9aaa' : snake.dancing ? mixColor(snake.innerColor, '#ffffff', pulse) : snake.innerColor;
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -1220,8 +1636,8 @@ function drawSnake(snake, t, now) {
 
   // Trazo exterior con brillo neón + trazo interior claro. Con SPEED activo, el brillo es cyan e intenso.
   const boosted = snake.alive && snake.tickInterval < TICK_MS;
-  ctx.shadowColor = boosted ? ITEM_TYPES.SPEED.color : color;
-  ctx.shadowBlur = boosted ? 45 : 24;
+  ctx.shadowColor = snake.dancing ? GOLD : boosted ? ITEM_TYPES.SPEED.color : color;
+  ctx.shadowBlur = snake.dancing ? 30 + 20 * pulse : boosted ? 45 : 24;
   ctx.strokeStyle = color;
   ctx.lineWidth = CELL * 0.95;
   ctx.stroke();
@@ -1234,7 +1650,7 @@ function drawSnake(snake, t, now) {
 
   // Cabeza
   const head = points[0];
-  ctx.fillStyle = snake.alive ? snake.headColor : '#ff5570';
+  ctx.fillStyle = !snake.alive ? '#ff5570' : snake.dancing ? mixColor(snake.headColor, '#ffffff', pulse) : snake.headColor;
   ctx.beginPath();
   ctx.arc(head.x, head.y, CELL * 0.55, 0, Math.PI * 2);
   ctx.fill();
@@ -1261,6 +1677,47 @@ function drawSnake(snake, t, now) {
     const bounce = Math.sin(now / 250) * 4;
     drawFlag(snake.flagId, head.x, head.y - CELL * 1.2 + bounce, CELL * 1.1);
   }
+}
+
+// Puntos dorados en los waypoints ya visitados, que se desvanecen poco a poco
+function drawDanceTrail(now) {
+  if (!state.dance) return;
+  ctx.save();
+  ctx.fillStyle = GOLD;
+  for (const v of state.dance.visited) {
+    const alpha = 0.6 * (1 - (now - v.at) / DANCE_TRAIL_FADE_MS);
+    if (alpha <= 0) continue;
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.arc(cellCenterX(v.x), cellCenterY(v.y), CELL * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// "🏆 ¡VICTORIA INMINENTE!" justo debajo del HUD (encima del HUD está la barra de TikTok), con pop de entrada
+function drawVictoryBanner(now) {
+  const elapsed = now - state.dance.startedAt;
+  const p = Math.min(1, elapsed / 450);
+  // Entra creciendo con un pequeño rebote (easeOutBack) y luego late suave
+  const back = 1 + 2.2 * (p - 1) ** 3 + 1.2 * (p - 1) ** 2;
+  const scale = p < 1 ? back : 1 + 0.04 * Math.sin(now / 180);
+  const cx = CANVAS_WIDTH / 2;
+  const y = GRID_Y + 80;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, elapsed / 200);
+  ctx.translate(cx, y);
+  ctx.scale(scale, scale);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const title = '🏆 ¡VICTORIA INMINENTE!';
+  ctx.shadowColor = GOLD;
+  ctx.shadowBlur = 25;
+  drawOutlinedText(title, 0, 0, fitFont(title, '900', 76, 1020), GOLD, 12);
+  ctx.shadowBlur = 0;
+  const label = DANCE_PATTERN_LABELS[state.dance.pattern] || state.dance.pattern;
+  drawOutlinedText(`baile: ${label}`, 0, 62, `bold 34px ${HUD_FONT}`, '#fff3b0', 6);
+  ctx.restore();
 }
 
 function drawParticles() {
@@ -1563,7 +2020,10 @@ function drawPvpHud() {
 // Título de la pantalla de fin de ronda (piezas para drawRichRow) según el modo y el resultado
 function getRoundEndTitle() {
   const piece = (text, color) => ({ text, weight: '900', size: 110, color });
-  if (state.mode !== 'PVP') return [piece('¡CHOCÓ!', '#ff3355')];
+  if (state.mode !== 'PVP') {
+    const danced = state.roundResult && state.roundResult.danced;
+    return danced ? [piece(`¡${state.snakes[0].score} PUNTOS! 🏆`, GOLD)] : [piece('¡CHOCÓ!', '#ff3355')];
+  }
   const winner = state.roundResult && state.roundResult.winner;
   if (winner) {
     return [piece('¡GANA ', winner.color), { flagId: winner.flagId, size: 120 }, piece(` ${winner.name}!`, winner.color)];
@@ -1646,13 +2106,15 @@ function render(now) {
   ctx.drawImage(gridLayer, 0, 0);
   drawFoods(now);
   drawItems(now);
+  drawDanceTrail(now);
   for (const snake of state.snakes) {
     // Progreso (0..1) entre el movimiento anterior y el siguiente de ESTA serpiente, para interpolar
-    const t = state.phase === 'playing' && snake.alive ? Math.min(1, snake.moveAccumulator / snake.tickInterval) : 1;
+    const t = isRoundActive() && canMove(snake) ? Math.min(1, snake.moveAccumulator / snake.tickInterval) : 1;
     drawSnake(snake, t, now);
   }
   drawParticles();
   drawHud();
+  if (state.phase === 'dancing') drawVictoryBanner(now);
   if (state.phase === 'dead') drawCountdown(now);
   drawThemeBanner(now);
   if (state.debug) drawDebug();
@@ -1672,11 +2134,13 @@ function frame(now) {
     // Si la pestaña estuvo pausada, no intentamos "recuperar" cientos de ticks de golpe
     if (dt > 250) dt = 250;
 
-    if (state.phase === 'playing') {
+    state.now = now;
+    if (isRoundActive()) {
       for (const snake of state.snakes) {
-        if (snake.alive) snake.moveAccumulator += dt;
+        if (canMove(snake)) snake.moveAccumulator += dt;
       }
       advanceSnakes(now);
+      updateRoundStatus(now);
     } else if (now - state.deathAt >= RESTART_DELAY_MS) {
       resetGame(now);
     }
@@ -1722,11 +2186,12 @@ window.addEventListener('keydown', (e) => {
 //   game.state, game.resetGame(), game.setTheme('real-barca'),
 //   game.onChatCommand('usuario', '!theme manzana-naranja'), game.msUntilThemeRotation(),
 //   game.spawnItem('BOMB'), game.spawnItem('WALL', 5, 10), game.AI_CONFIG.avoidBombs = false,
-//   game.handleTikTokEvent({type: 'chat', user: 'x', message: '!team colombia'}), game.getTeamCounts()
+//   game.handleTikTokEvent({type: 'chat', user: 'x', message: '!team colombia'}), game.getTeamCounts(),
+//   game.triggerVictoryDance(game.state.snakes[0], 'heart')
 window.game = {
   state, resetGame, tick, setTheme, onChatCommand, msUntilThemeRotation, spawnItem,
-  handleTikTokEvent, registerTeam, getTeamCounts,
-  THEMES, FLAG_RENDERERS, ITEM_TYPES, AI_CONFIG,
+  handleTikTokEvent, registerTeam, getTeamCounts, triggerVictoryDance, checkVictoryInminent,
+  THEMES, FLAG_RENDERERS, ITEM_TYPES, AI_CONFIG, DANCE_PATTERNS,
 };
 
 resetGame();
