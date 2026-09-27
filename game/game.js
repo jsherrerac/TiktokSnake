@@ -54,8 +54,12 @@ const ITEM_TYPES = {
 };
 // Qué hace la IA con los items. Configurable en caliente (game.AI_CONFIG) para ajustar el juego en Fase 5.
 const AI_CONFIG = {
-  avoidWalls: true,     // trata los muros como obstáculo
-  avoidBombs: true,     // trata las bombas activas como obstáculo
+  avoidWalls: true,     // interruptor general: si es false, la IA nunca ve los muros
+  avoidBombs: true,     // interruptor general: si es false, la IA nunca ve las bombas
+  // La IA solo "ve" bombas y muros a esta distancia manhattan de su cabeza (o menos)
+  BOMB_VISION_RADIUS: 3,
+  // Con la bomba/muro pegado a la cabeza (distancia 1), probabilidad de no reaccionar, como un humano despistado
+  BOMB_MISS_CHANCE: 0.30,
   seekMegaFood: true,   // va a por la mega-food como si fuera comida
   seekSpeed: true,      // va a por el speed como si fuera comida
 };
@@ -269,11 +273,20 @@ function isHeadNextToFood(snake) {
   return state.foods.some(near) || state.items.some((it) => it.type === 'MEGA_FOOD' && near(it));
 }
 
-// Items que la IA trata como pared (según AI_CONFIG)
-function isItemObstacleForAI(item) {
-  if (item.type === 'WALL') return AI_CONFIG.avoidWalls;
-  if (item.type === 'BOMB') return AI_CONFIG.avoidBombs && !item.meta.detonatedAt;
-  return false;
+// ¿La IA de `viewer` trata este item como pared en esta decisión? Solo muros y bombas activas, y solo si:
+// - están a BOMB_VISION_RADIUS o menos de su cabeza (de lejos no los ve), y
+// - pegados a la cabeza (distancia 1), además pasan la tirada de BOMB_MISS_CHANCE (si falla, no reacciona).
+// La tirada se hace en cada decisión, así que un despiste dura solo ese paso.
+function isItemObstacleForAI(item, viewer) {
+  let watched = false;
+  if (item.type === 'WALL') watched = AI_CONFIG.avoidWalls;
+  else if (item.type === 'BOMB') watched = AI_CONFIG.avoidBombs && !item.meta.detonatedAt;
+  if (!watched) return false;
+  const head = viewer.body[0];
+  const distance = Math.abs(item.x - head.x) + Math.abs(item.y - head.y);
+  if (distance > AI_CONFIG.BOMB_VISION_RADIUS) return false;
+  if (distance === 1 && Math.random() < AI_CONFIG.BOMB_MISS_CHANCE) return false;
+  return true;
 }
 
 // Items que la IA persigue como si fueran comida (según AI_CONFIG)
@@ -290,7 +303,7 @@ function isItemTargetForAI(item) {
 function buildBlockedGrid(viewer, movers) {
   const blocked = new Uint8Array(CELL_COUNT);
   for (const item of state.items) {
-    if (isItemObstacleForAI(item)) blocked[cellIndex(item.x, item.y)] = 1;
+    if (isItemObstacleForAI(item, viewer)) blocked[cellIndex(item.x, item.y)] = 1;
   }
   for (const snake of state.snakes) {
     const len = snake.body.length;
@@ -846,8 +859,11 @@ function getTeamCounts() {
 // ---------- Puente TikTok: cliente WebSocket ----------
 
 // Conecta con el puente (bridge/tiktok-bridge.js). Si no está o se cae, reintenta cada BRIDGE_RETRY_MS.
-// Nota: Chrome escribe por su cuenta "WebSocket connection ... failed" en la consola en cada intento
-// fallido; eso no se puede silenciar desde JS.
+// Nota: mientras el puente esté apagado, Chrome escribe "WebSocket connection to ... failed" en la consola
+// en cada intento. Lo emite la capa de red del navegador (no es una excepción de JS), así que no se puede
+// silenciar: se probó con try/catch + onerror.preventDefault(), capturando 'error' en window, abriendo el
+// WebSocket dentro de un Worker y sondeando antes con fetch (que deja su propio "Failed to load resource").
+// Para no verlo: en DevTools > Console > ajustes, marcar "Hide network". En OBS la consola no se ve.
 function connectToBridge() {
   let socket;
   try {
@@ -1522,6 +1538,7 @@ function drawPvpHud() {
       ],
       x, HUD_TOP + 98, 440, 6
     );
+    // TODO: probar 96px en primera transmisión real, evaluar legibilidad en móvil
     drawOutlinedText(String(snake.score), x, HUD_TOP + 160, `900 84px ${HUD_FONT}`, snake.color, 9);
   }
   drawOutlinedText('VS', cx, HUD_TOP + 130, `900 48px ${HUD_FONT}`, 'rgba(255,255,255,0.55)', 6);

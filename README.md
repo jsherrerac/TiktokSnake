@@ -40,7 +40,9 @@ Para transmitir: en OBS / TikTok LIVE Studio añade una fuente **Navegador** apu
 - `game.spawnItem('BOMB')` en una celda libre aleatoria, o `game.spawnItem('WALL', x, y)` en una celda concreta
   (x 0-19, y 0-25). También acepta `'mega-food'`, `'bomb'`, etc.
 - `game.state.items` y `game.state.activeEffects` muestran lo que hay en juego.
-- `game.AI_CONFIG`: qué hace la IA con los items (por defecto esquiva muros y bombas, y busca mega-food y speed).
+- `game.AI_CONFIG`: qué hace la IA con los items, ajustable en caliente. Busca mega-food y speed.
+  Muros y bombas solo los ve a `BOMB_VISION_RADIUS` (3) casillas o menos, y si están pegados a la cabeza
+  no reacciona con probabilidad `BOMB_MISS_CHANCE` (0.30). `avoidWalls` / `avoidBombs` a `false` los apaga del todo.
 
 ## Puente TikTok Live (`bridge/`)
 
@@ -50,8 +52,11 @@ TIKTOK_USER=usuario node bridge/tiktok-bridge.js     # live real (requiere: cd b
 ```
 
 - Levanta un servidor WebSocket en `ws://localhost:8080`; el juego se conecta solo y reintenta cada 5 s
-  si el puente no está o se cae. Chrome escribe "WebSocket connection ... failed" en la consola en cada
-  intento fallido: es normal mientras el puente esté apagado.
+  si el puente no está o se cae. Mientras el puente esté apagado, Chrome escribe "WebSocket connection ... failed"
+  en la consola en cada intento. **No se puede silenciar desde JS**: lo emite la capa de red del navegador
+  (probado con try/catch + `onerror.preventDefault()`, capturando `error` en `window`, WebSocket dentro de un
+  Worker y sondeo previo con `fetch`, que deja su propio "Failed to load resource"). Para ocultarlo en DevTools:
+  ajustes de la consola > "Hide network". En OBS la consola no se ve.
 - **Modo mock**: sin `TIKTOK_USER`, con `--mock`, o si `tiktok-live-connector` no está instalado. Al conectarse
   el juego manda una secuencia fija (`test1: !team colombia`, una Rosa de `test2`, `test3: !team argentina`)
   y luego eventos aleatorios.
