@@ -5,7 +5,7 @@
    - Fase 1: grid 30x53, IA con BFS, auto-restart con countdown.
              Lógica a 15 ticks/s, render a 60 FPS con interpolación.
    - Fase 2: modo PvP (2 serpientes) con rondas ganadas persistentes.
-   - Fase 3: temáticas (colores, nombres, emojis), cambio en caliente y rotación automática.
+   - Fase 3: temáticas (colores, nombres, banderas dibujadas en canvas), cambio en caliente y rotación automática.
    ========================================================= */
 
 // ---------- Modo de juego ----------
@@ -17,16 +17,17 @@ let MODE = 'PVP';
 const CANVAS_WIDTH = 1080;
 const CANVAS_HEIGHT = 1920;
 const COLS = 20;
-const ROWS = 32;
+const ROWS = 26;
 const CELL = 54;
-const CELL_COUNT = COLS * ROWS;
+const CELL_COUNT = COLS * ROWS; // 520
 
-// Las 3 filas de arriba quedan libres para el HUD (no se superpone al juego).
-// 20 * 54 = 1080px de ancho exacto. Alto: GRID_Y = 3 * 54 + 15 = 177; 177 + 32 * 54 = 1905 -> sobran 15px abajo.
-const HUD_ROWS = 3;
-const GRID_TOP_MARGIN = 15;
+// Los primeros ~200px los tapa la barra superior de TikTok Live (nombre del streamer, viewers):
+// el HUD vive debajo, entre HUD_TOP y HUD_BOTTOM, y el grid empieza después.
+// Ancho: 20 * 54 = 1080px exacto. Alto: GRID_Y = 480; 480 + 26 * 54 = 1884 -> sobran 36px abajo.
+const HUD_TOP = 200;
+const HUD_BOTTOM = 460;
 const GRID_X = 0;
-const GRID_Y = HUD_ROWS * CELL + GRID_TOP_MARGIN;
+const GRID_Y = 480;
 
 const TICK_RATE = 15;                 // movimientos por segundo
 const TICK_MS = 1000 / TICK_RATE;
@@ -44,25 +45,26 @@ const BEST_SCORE_KEY = 'snakeTikTok.bestScore';
 const STATS_KEY = 'snakeTikTok.themeStats';
 
 // ---------- Temáticas ----------
-// Cada temática define nombre, colores y emoji de cada jugador, y el fondo del canvas.
+// Cada temática define nombre, colores y bandera (flagId -> FLAG_RENDERERS) de cada jugador, y el fondo.
+// Las banderas se dibujan con canvas porque Chrome en Windows no pinta los emojis de bandera (🇨🇴 sale como "CO").
 // El orden de las keys es el orden de la rotación automática.
 const THEMES = {
   'colombia-argentina': {
-    displayName: 'Colombia 🇨🇴 vs Argentina 🇦🇷',
-    p1: { name: 'COLOMBIA', color: '#ffcd00', innerColor: '#ffe066', headColor: '#fff099', emoji: '🇨🇴', flagLabel: 'COL' },
-    p2: { name: 'ARGENTINA', color: '#75aadb', innerColor: '#a8ccea', headColor: '#c3dbef', emoji: '🇦🇷', flagLabel: 'ARG' },
+    displayName: 'Colombia vs Argentina',
+    p1: { name: 'COLOMBIA', color: '#ffcd00', innerColor: '#ffe066', headColor: '#fff099', flagId: 'colombia', flagLabel: 'COL' },
+    p2: { name: 'ARGENTINA', color: '#75aadb', innerColor: '#a8ccea', headColor: '#c3dbef', flagId: 'argentina', flagLabel: 'ARG' },
     background: '#0a0a15',
   },
   'real-barca': {
-    displayName: 'Real Madrid ⚪ vs Barcelona 🔴',
-    p1: { name: 'REAL', color: '#ffffff', innerColor: '#f0f0f0', headColor: '#e0e0e0', emoji: '⚪', flagLabel: 'RMA' },
-    p2: { name: 'BARÇA', color: '#a50044', innerColor: '#c1005a', headColor: '#d81b60', emoji: '🔴', flagLabel: 'FCB' },
+    displayName: 'Real Madrid vs Barcelona',
+    p1: { name: 'REAL', color: '#ffffff', innerColor: '#f0f0f0', headColor: '#e0e0e0', flagId: 'real', flagLabel: 'RMA' },
+    p2: { name: 'BARÇA', color: '#a50044', innerColor: '#c1005a', headColor: '#d81b60', flagId: 'barca', flagLabel: 'FCB' },
     background: '#0a0a15',
   },
   'manzana-naranja': {
-    displayName: '🍎 Manzana vs Naranja 🍊',
-    p1: { name: 'MANZANA', color: '#e63946', innerColor: '#f28b93', headColor: '#f5a5ab', emoji: '🍎', flagLabel: 'MZN' },
-    p2: { name: 'NARANJA', color: '#ff8c00', innerColor: '#ffb04d', headColor: '#ffc370', emoji: '🍊', flagLabel: 'NRJ' },
+    displayName: 'Manzana vs Naranja',
+    p1: { name: 'MANZANA', color: '#e63946', innerColor: '#f28b93', headColor: '#f5a5ab', flagId: 'manzana', flagLabel: 'MZN' },
+    p2: { name: 'NARANJA', color: '#ff8c00', innerColor: '#ffb04d', headColor: '#ffc370', flagId: 'naranja', flagLabel: 'NRJ' },
     background: '#0a0a15',
   },
 };
@@ -163,7 +165,7 @@ function getThemeStats(themeId) {
 }
 
 // ---------- Creación de entidades ----------
-// Los colores, nombre y emoji salen de la temática de la ronda según el id ('p1' | 'p2')
+// Los colores, nombre y bandera salen de la temática de la ronda según el id ('p1' | 'p2')
 function createSnake(id, startX, startY, dir) {
   const config = THEMES[state.roundTheme][id];
   const body = [];
@@ -185,7 +187,7 @@ function createSnake(id, startX, startY, dir) {
     color: config.color,
     innerColor: config.innerColor,
     headColor: config.headColor,
-    emoji: config.emoji,
+    flagId: config.flagId,
   };
 }
 
@@ -744,10 +746,10 @@ function drawSnake(snake, t, now) {
   }
   ctx.restore();
 
-  // Emoji de la temática flotando sobre la cabeza, con un leve rebote (solo si está viva)
-  if (snake.alive && snake.emoji) {
+  // Bandera de la temática flotando sobre la cabeza, con un leve rebote (solo si está viva)
+  if (snake.alive && snake.flagId) {
     const bounce = Math.sin(now / 250) * 4;
-    drawEmoji(snake.emoji, head.x, head.y - CELL * 1.2 + bounce, 48);
+    drawFlag(snake.flagId, head.x, head.y - CELL * 1.2 + bounce, CELL * 1.1);
   }
 }
 
@@ -773,16 +775,177 @@ function drawOutlinedText(text, x, y, font, fill, strokeWidth) {
 }
 
 const HUD_FONT = '"Segoe UI", Arial, sans-serif';
-const EMOJI_FONT = '"Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
 
-// Emoji centrado en (x, y); sin contorno para no ensuciar el dibujo del emoji
-function drawEmoji(emoji, x, y, size) {
+// ---------- Banderas y skins dibujadas con canvas ----------
+// Cada renderer recibe (ctx, x, y, size) y dibuja centrado en (x, y).
+// `size` es el ancho; las banderas rectangulares miden size x (size * 2/3), las frutas size x size.
+
+// Grosor de borde que escala con el tamaño (1px de referencia en una bandera de 60px)
+const flagBorderWidth = (size, base) => Math.max(1, (base * size) / 60);
+
+function flagBox(x, y, size) {
+  const w = size;
+  const h = (size * 2) / 3;
+  return { left: x - w / 2, top: y - h / 2, w, h };
+}
+
+function drawColombiaFlag(ctx, x, y, size) {
+  const { left, top, w, h } = flagBox(x, y, size);
+  ctx.fillStyle = '#ffcd00';
+  ctx.fillRect(left, top, w, h / 2);
+  ctx.fillStyle = '#003893';
+  ctx.fillRect(left, top + h / 2, w, h / 4);
+  ctx.fillStyle = '#ce1126';
+  ctx.fillRect(left, top + (h * 3) / 4, w, h / 4);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = flagBorderWidth(size, 1);
+  ctx.strokeRect(left, top, w, h);
+}
+
+function drawArgentinaFlag(ctx, x, y, size) {
+  const { left, top, w, h } = flagBox(x, y, size);
+  ctx.fillStyle = '#75aadb';
+  ctx.fillRect(left, top, w, h);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(left, top + h / 3, w, h / 3);
+  // Sol de Mayo simplificado
+  ctx.fillStyle = '#f6b40e';
+  ctx.beginPath();
+  ctx.arc(x, y, h * 0.12, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = flagBorderWidth(size, 1);
+  ctx.strokeRect(left, top, w, h);
+}
+
+function drawRealFlag(ctx, x, y, size) {
+  const { left, top, w, h } = flagBox(x, y, size);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(left, top, w, h);
+  // Banda diagonal morada sutil
   ctx.save();
-  ctx.textAlign = 'center';
+  ctx.beginPath();
+  ctx.rect(left, top, w, h);
+  ctx.clip();
+  ctx.strokeStyle = 'rgba(90, 42, 130, 0.55)';
+  ctx.lineWidth = h * 0.16;
+  ctx.beginPath();
+  ctx.moveTo(left, top + h);
+  ctx.lineTo(left + w, top);
+  ctx.stroke();
+  ctx.restore();
+  ctx.strokeStyle = '#febe10';
+  ctx.lineWidth = flagBorderWidth(size, 2);
+  ctx.strokeRect(left, top, w, h);
+}
+
+function drawBarcaFlag(ctx, x, y, size) {
+  const { left, top, w, h } = flagBox(x, y, size);
+  const stripes = 5;
+  for (let i = 0; i < stripes; i++) {
+    ctx.fillStyle = i % 2 === 0 ? '#004d98' : '#a50044';
+    // +0.5 para que no queden rendijas entre franjas al escalar
+    ctx.fillRect(left + (w * i) / stripes, top, w / stripes + 0.5, h);
+  }
+  ctx.strokeStyle = '#febe10';
+  ctx.lineWidth = flagBorderWidth(size, 1);
+  ctx.strokeRect(left, top, w, h);
+}
+
+// Tallo y hoja comunes a las frutas
+function drawFruitStem(ctx, x, top, size) {
+  ctx.fillStyle = '#5a3a1a';
+  ctx.fillRect(x - size * 0.035, top - size * 0.14, size * 0.07, size * 0.2);
+  ctx.fillStyle = '#2e9e44';
+  ctx.beginPath();
+  ctx.ellipse(x + size * 0.11, top - size * 0.06, size * 0.11, size * 0.05, -0.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawApple(ctx, x, y, size) {
+  const r = size * 0.4;
+  const cy = y + size * 0.06;
+  ctx.fillStyle = '#e63946';
+  ctx.beginPath();
+  ctx.arc(x, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  // Brillo
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.beginPath();
+  ctx.arc(x - r * 0.4, cy - r * 0.35, r * 0.22, 0, Math.PI * 2);
+  ctx.fill();
+  drawFruitStem(ctx, x, cy - r, size);
+}
+
+function drawOrange(ctx, x, y, size) {
+  const r = size * 0.4;
+  const cy = y + size * 0.06;
+  ctx.fillStyle = '#ff8c00';
+  ctx.beginPath();
+  ctx.arc(x, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  // Gajos: líneas radiales blancas sutiles
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.lineWidth = Math.max(1, size * 0.02);
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = (i * Math.PI) / 4;
+    ctx.moveTo(x + Math.cos(a) * r * 0.15, cy + Math.sin(a) * r * 0.15);
+    ctx.lineTo(x + Math.cos(a) * r * 0.8, cy + Math.sin(a) * r * 0.8);
+  }
+  ctx.stroke();
+  drawFruitStem(ctx, x, cy - r, size);
+}
+
+const FLAG_RENDERERS = {
+  colombia: drawColombiaFlag,
+  argentina: drawArgentinaFlag,
+  real: drawRealFlag,
+  barca: drawBarcaFlag,
+  manzana: drawApple,
+  naranja: drawOrange,
+};
+
+// Dibuja la bandera/skin `flagId` centrada en (x, y). Si no existe, un recuadro gris con "?".
+function drawFlag(flagId, x, y, size) {
+  ctx.save();
+  const renderer = FLAG_RENDERERS[flagId];
+  if (renderer) {
+    renderer(ctx, x, y, size);
+  } else {
+    const { left, top, w, h } = flagBox(x, y, size);
+    ctx.fillStyle = '#555';
+    ctx.fillRect(left, top, w, h);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.round(h * 0.7)}px ${HUD_FONT}`;
+    ctx.fillText('?', x, y);
+  }
+  ctx.restore();
+}
+
+// Línea centrada en cx que mezcla trozos de texto y banderas:
+//   { text, weight, size, color }  o  { flagId, size }
+// Si no cabe en maxWidth, se escala todo (textos y banderas) por igual.
+function drawRichRow(pieces, cx, y, maxWidth, strokeWidth) {
+  ctx.save();
+  ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.font = `${size}px ${EMOJI_FONT}`;
-  ctx.fillStyle = '#fff';
-  ctx.fillText(emoji, x, y);
+  const widthOf = (p, k) => {
+    if (p.flagId) return p.size * k;
+    ctx.font = `${p.weight} ${p.size * k}px ${HUD_FONT}`;
+    return ctx.measureText(p.text).width;
+  };
+  const total = pieces.reduce((sum, p) => sum + widthOf(p, 1), 0);
+  const k = Math.min(1, maxWidth / total);
+  let x = cx - (total * k) / 2;
+  for (const p of pieces) {
+    const w = widthOf(p, k);
+    if (p.flagId) drawFlag(p.flagId, x + w / 2, y, p.size * k);
+    else drawOutlinedText(p.text, x, y, `${p.weight} ${p.size * k}px ${HUD_FONT}`, p.color, strokeWidth);
+    x += w;
+  }
   ctx.restore();
 }
 
@@ -814,7 +977,7 @@ function drawTextRow(pieces, cx, y, strokeWidth) {
 }
 
 // ---------- HUD ----------
-// Vive en la franja superior (0..GRID_Y = 177px), que el área de juego ya no ocupa.
+// Vive entre HUD_TOP (200) y HUD_BOTTOM (460): debajo de la barra de TikTok Live y encima del grid (480).
 
 function drawHud() {
   if (state.snakes.length === 0) return;
@@ -828,51 +991,61 @@ function drawSoloHud() {
   ctx.save();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  drawEmoji(snake.emoji, cx - 150, 42, 52);
-  drawOutlinedText(snake.name, cx + 30, 42, fitFont(snake.name, 'bold', 40, 300), snake.color, 6);
-  drawOutlinedText(String(snake.score), cx, 104, `900 72px ${HUD_FONT}`, '#ffffff', 8);
-  drawOutlinedText(`RÉCORD ${state.bestScore}   ·   RONDA ${state.round}`, cx, 160, `bold 26px ${HUD_FONT}`, '#ffd84d', 5);
+  drawRichRow(
+    [
+      { flagId: snake.flagId, size: 56 },
+      { text: `  ${snake.name}`, weight: 'bold', size: 48, color: snake.color },
+    ],
+    cx, HUD_TOP + 55, 900, 6
+  );
+  drawOutlinedText(String(snake.score), cx, HUD_TOP + 140, `900 110px ${HUD_FONT}`, '#ffffff', 10);
+  drawOutlinedText(`RÉCORD ${state.bestScore}   ·   RONDA ${state.round}`, cx, HUD_TOP + 225, `bold 32px ${HUD_FONT}`, '#ffd84d', 6);
   ctx.restore();
 }
 
-// PvP: título del matchup, una columna por jugador (emoji, nombre, puntos) y el marcador abajo
+// PvP: título del matchup, una columna por jugador (bandera + nombre, puntos) y el marcador abajo
 function drawPvpHud() {
   const [p1, p2] = state.snakes;
   const theme = THEMES[state.roundTheme];
   const stats = getThemeStats(state.roundTheme);
   const cx = CANVAS_WIDTH / 2;
   ctx.save();
+  ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  ctx.textAlign = 'center';
-  drawOutlinedText(theme.displayName, cx, 30, fitFont(theme.displayName, 'bold', 32, 1000), 'rgba(255,255,255,0.9)', 5);
+  drawOutlinedText(theme.displayName, cx, HUD_TOP + 36, fitFont(theme.displayName, 'bold', 40, 1000), 'rgba(255,255,255,0.9)', 6);
 
-  // Columna izquierda: emoji | nombre / puntos (alineados a la izquierda)
-  drawEmoji(p1.emoji, 70, 100, 64);
-  ctx.textAlign = 'left';
-  drawOutlinedText(p1.name, 118, 74, fitFont(p1.name, 'bold', 30, 300), p1.color, 5);
-  drawOutlinedText(String(p1.score), 118, 118, `900 56px ${HUD_FONT}`, p1.color, 7);
-
-  // Columna derecha: espejo de la izquierda
-  drawEmoji(p2.emoji, CANVAS_WIDTH - 70, 100, 64);
-  ctx.textAlign = 'right';
-  drawOutlinedText(p2.name, CANVAS_WIDTH - 118, 74, fitFont(p2.name, 'bold', 30, 300), p2.color, 5);
-  drawOutlinedText(String(p2.score), CANVAS_WIDTH - 118, 118, `900 56px ${HUD_FONT}`, p2.color, 7);
-
-  ctx.textAlign = 'center';
-  drawOutlinedText('VS', cx, 96, `900 36px ${HUD_FONT}`, 'rgba(255,255,255,0.55)', 5);
+  // Una columna por jugador: bandera pequeña + nombre, y debajo los puntos grandes
+  const columns = [
+    { snake: p1, x: CANVAS_WIDTH * 0.25 },
+    { snake: p2, x: CANVAS_WIDTH * 0.75 },
+  ];
+  for (const { snake, x } of columns) {
+    drawRichRow(
+      [
+        { flagId: snake.flagId, size: 40 },
+        { text: ` ${snake.name}`, weight: 'bold', size: 40, color: snake.color },
+      ],
+      x, HUD_TOP + 98, 440, 6
+    );
+    drawOutlinedText(String(snake.score), x, HUD_TOP + 170, `900 96px ${HUD_FONT}`, snake.color, 10);
+  }
+  drawOutlinedText('VS', cx, HUD_TOP + 135, `900 48px ${HUD_FONT}`, 'rgba(255,255,255,0.55)', 6);
 
   const scoreLine = `MARCADOR: ${p1.name} ${stats.p1Wins} - ${stats.p2Wins} ${p2.name}  ·  EMPATES: ${stats.draws}  ·  RONDA ${state.round}`;
-  drawOutlinedText(scoreLine, cx, 160, fitFont(scoreLine, 'bold', 24, 1040), 'rgba(255,255,255,0.75)', 4);
+  drawOutlinedText(scoreLine, cx, HUD_TOP + 235, fitFont(scoreLine, 'bold', 28, 1040), 'rgba(255,255,255,0.75)', 5);
   ctx.restore();
 }
 
-// Título de la pantalla de fin de ronda según el modo y el resultado
+// Título de la pantalla de fin de ronda (piezas para drawRichRow) según el modo y el resultado
 function getRoundEndTitle() {
-  if (state.mode !== 'PVP') return { text: '¡CHOCÓ!', color: '#ff3355' };
+  const piece = (text, color) => ({ text, weight: '900', size: 110, color });
+  if (state.mode !== 'PVP') return [piece('¡CHOCÓ!', '#ff3355')];
   const winner = state.roundResult && state.roundResult.winner;
-  if (winner) return { text: `¡GANA ${winner.emoji} ${winner.name}!`, color: winner.color };
-  return { text: '¡EMPATE! 🤝', color: '#ffd84d' };
+  if (winner) {
+    return [piece('¡GANA ', winner.color), { flagId: winner.flagId, size: 120 }, piece(` ${winner.name}!`, winner.color)];
+  }
+  return [piece('¡EMPATE! 🤝', '#ffd84d')];
 }
 
 function drawCountdown(now) {
@@ -890,10 +1063,9 @@ function drawCountdown(now) {
   ctx.textBaseline = 'middle';
   const cx = CANVAS_WIDTH / 2;
   const cy = CANVAS_HEIGHT / 2;
-  const title = getRoundEndTitle();
-  drawOutlinedText(title.text, cx, cy - 260, fitFont(title.text, '900', 110, 1020), title.color, 14);
-  drawOutlinedText('Siguiente ronda en', cx, cy - 150, `bold 54px ${HUD_FONT}`, '#ffffff', 8);
-  ctx.translate(cx, cy + 40);
+  drawRichRow(getRoundEndTitle(), cx, cy - 260, 1020, 14);
+  drawOutlinedText('Siguiente ronda en', cx, cy - 130, `bold 54px ${HUD_FONT}`, '#ffffff', 8);
+  ctx.translate(cx, cy + 60);
   ctx.scale(scale, scale);
   drawOutlinedText(String(number), 0, 0, `900 260px ${HUD_FONT}`, '#ffffff', 18);
   ctx.restore();
@@ -910,7 +1082,7 @@ function drawThemeBanner(now) {
   }
   // Opacidad 0 -> 1 en el primer 20%, 1 en el medio, 1 -> 0 en el último 20%
   const alpha = Math.min(1, progress / 0.2, (1 - progress) / 0.2);
-  const displayName = THEMES[banner.themeId].displayName;
+  const theme = THEMES[banner.themeId];
   const cx = CANVAS_WIDTH / 2;
   const cy = CANVAS_HEIGHT / 2;
 
@@ -921,7 +1093,14 @@ function drawThemeBanner(now) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   drawOutlinedText('PRÓXIMA RONDA:', cx, cy - 70, `900 80px ${HUD_FONT}`, '#ffd84d', 12);
-  drawOutlinedText(displayName, cx, cy + 40, fitFont(displayName, '900', 66, 1000), '#ffffff', 10);
+  drawRichRow(
+    [
+      { flagId: theme.p1.flagId, size: 90 },
+      { text: `  ${theme.displayName}  `, weight: '900', size: 66, color: '#ffffff' },
+      { flagId: theme.p2.flagId, size: 90 },
+    ],
+    cx, cy + 40, 1020, 10
+  );
   ctx.restore();
 }
 
@@ -1024,7 +1203,7 @@ window.addEventListener('keydown', (e) => {
 // Acceso desde la consola del navegador para pruebas:
 //   game.state, game.resetGame(), game.setTheme('real-barca'),
 //   game.onChatCommand('usuario', '!theme manzana-naranja'), game.msUntilThemeRotation()
-window.game = { state, resetGame, tick, setTheme, onChatCommand, msUntilThemeRotation, THEMES };
+window.game = { state, resetGame, tick, setTheme, onChatCommand, msUntilThemeRotation, THEMES, FLAG_RENDERERS };
 
 resetGame();
 requestAnimationFrame(frame);
