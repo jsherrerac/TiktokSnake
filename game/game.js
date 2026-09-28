@@ -109,8 +109,37 @@ const DANCE_TRAIL_FADE_MS = 8000; // lo que tardan en desvanecerse los puntos do
 const GOLD = '#ffd700';
 
 // ---------- Puente TikTok ----------
-const BRIDGE_URL = 'ws://localhost:8080';
+// Servido por el puente (http://localhost:8080/) usa el mismo host; abierto como archivo, el puerto por defecto.
+// Desde otro servidor (p. ej. Live Server) se puede indicar con ?bridge=ws://localhost:8080
+const BRIDGE_URL =
+  new URLSearchParams(location.search).get('bridge') ||
+  (location.protocol.startsWith('http') ? `ws://${location.host}` : 'ws://localhost:8080');
 const BRIDGE_RETRY_MS = 5000;
+const GAME_STATUS_INTERVAL_MS = 2000; // cada cuánto el juego reporta fps/errores al panel
+
+// ---------- Ajustes (config/settings.json, editable sin tocar código) ----------
+// Valores por defecto; si el juego se sirve por HTTP se sobrescriben con config/settings.json.
+const SETTINGS = {
+  showConnectionDot: true, // punto verde/amarillo/rojo del estado de conexión, arriba a la izquierda
+};
+
+// Lee un JSON de config/ (solo si el juego se sirve por HTTP; con file:// Chrome bloquea el fetch)
+async function loadConfigJson(name) {
+  if (!location.protocol.startsWith('http')) return null;
+  try {
+    const res = await fetch(`/config/${name}?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    console.warn(`[config] no se pudo cargar config/${name}: ${e.message}`);
+    return null;
+  }
+}
+
+async function loadSettings() {
+  const loaded = await loadConfigJson('settings.json');
+  if (loaded) Object.assign(SETTINGS, loaded);
+}
 
 // Orden fijo: arriba, derecha, abajo, izquierda
 const DIRECTIONS = [
@@ -138,6 +167,7 @@ const state = {
   themeBanner: null,            // { themeId, startedAt } mientras se muestra el cartel de cambio
   lastThemeRotationAt: performance.now(),
   bridgeConnected: false,       // true mientras hay conexión con el puente de TikTok
+  bridgeStatus: null,           // último estado que manda el puente (TikTok conectado, mock...)
   teams: new Map(),             // username -> 'p1' | 'p2' (se vacía al cambiar de temática)
   knownUsers: new Set(),        // usuarios vistos en cualquier evento de TikTok (para contar neutrales)
   foods: [],
@@ -1260,6 +1290,8 @@ function getTeamCounts() {
 // silenciar: se probó con try/catch + onerror.preventDefault(), capturando 'error' en window, abriendo el
 // WebSocket dentro de un Worker y sondeando antes con fetch (que deja su propio "Failed to load resource").
 // Para no verlo: en DevTools > Console > ajustes, marcar "Hide network". En OBS la consola no se ve.
+let bridgeSocket = null;
+
 function connectToBridge() {
   let socket;
   try {
@@ -1269,26 +1301,76 @@ function connectToBridge() {
     return;
   }
   socket.onopen = () => {
+    bridgeSocket = socket;
     state.bridgeConnected = true;
+    socket.send(JSON.stringify({ kind: 'hello', role: 'game' }));
     console.info(`[bridge] conectado a ${BRIDGE_URL}`);
   };
   socket.onmessage = (msg) => {
-    let event;
+    let data;
     try {
-      event = JSON.parse(msg.data);
+      data = JSON.parse(msg.data);
     } catch (e) {
       console.warn('[bridge] mensaje que no es JSON:', msg.data);
       return;
     }
-    handleTikTokEvent(event);
+    // Mensajes del sistema llevan `kind`; los eventos de TikTok, `type`
+    if (data.kind) handleBridgeMessage(data);
+    else handleTikTokEvent(data);
   };
   socket.onclose = () => {
     if (state.bridgeConnected) console.info(`[bridge] desconectado; reintentando cada ${BRIDGE_RETRY_MS / 1000} s`);
     state.bridgeConnected = false;
+    state.bridgeStatus = null;
+    bridgeSocket = null;
     setTimeout(connectToBridge, BRIDGE_RETRY_MS);
   };
   // onerror siempre va seguido de onclose, que es quien reintenta
   socket.onerror = () => {};
+}
+
+function sendToBridge(obj) {
+  if (bridgeSocket && bridgeSocket.readyState === WebSocket.OPEN) bridgeSocket.send(JSON.stringify(obj));
+}
+
+// Mensajes del puente que no son eventos de TikTok: estado de la conexión y órdenes del panel
+function handleBridgeMessage(msg) {
+  if (msg.kind === 'status') {
+    state.bridgeStatus = msg;
+  } else if (msg.kind === 'command') {
+    handleControlCommand(msg.command, msg.args);
+  }
+}
+
+// Órdenes del panel de control (se amplían en el Bloque 5)
+const CONTROL_COMMANDS = {};
+
+function handleControlCommand(command, args) {
+  const handler = CONTROL_COMMANDS[command];
+  if (!handler) {
+    console.warn(`[panel] orden desconocida: ${command}`);
+    return;
+  }
+  try {
+    handler(args);
+  } catch (err) {
+    console.error(`[panel] error en la orden ${command}`, err);
+  }
+}
+
+// Reporte periódico al panel: fps, ronda, errores
+function reportGameStatus() {
+  sendToBridge({
+    kind: 'gameStatus',
+    fps: perf.fps,
+    tps: perf.tps,
+    round: state.round,
+    phase: state.phase,
+    mode: state.mode,
+    theme: state.roundTheme,
+    errors: perf.errorsTotal,
+    items: state.items.length,
+  });
 }
 
 // Dispatcher de eventos de TikTok (contrato en README). Por ahora solo registra el evento y atiende
@@ -1310,7 +1392,7 @@ function handleTikTokEvent(event) {
   }
 }
 
-// ---------- Partículas// ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
+// ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
 function spawnBurst(x, y, color, count) {
   for (let i = 0; i < count; i++) {
     const angle = Math.random() * Math.PI * 2;
@@ -1950,6 +2032,40 @@ function drawHud() {
   if (state.snakes.length === 0) return;
   if (state.mode === 'PVP') drawPvpHud();
   else drawSoloHud();
+  if (SETTINGS.showConnectionDot) drawConnectionDot();
+}
+
+// Punto discreto arriba a la izquierda del HUD (bajo la barra de TikTok) con el estado de la conexión:
+// verde = LIVE de TikTok conectado · amarillo = puente OK pero sin LIVE (mock, esperando live...) · rojo = sin puente
+function drawConnectionDot() {
+  const s = state.bridgeStatus;
+  let color = '#ff3355';
+  let label = 'sin puente';
+  if (state.bridgeConnected && s) {
+    const tiktokState = s.tiktok && s.tiktok.state;
+    if (tiktokState === 'connected') {
+      color = '#2ee66b';
+      label = 'LIVE';
+    } else if (s.mode === 'tiktok') {
+      color = '#ffc233';
+      label = tiktokState === 'ended' ? 'live terminado' : tiktokState === 'error' ? 'error TikTok' : 'esperando live';
+    } else {
+      color = '#ffc233';
+      label = s.mock && s.mock.running ? 'mock' : 'simulador';
+    }
+  }
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(26, HUD_TOP + 18, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold 18px ${HUD_FONT}`;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+  ctx.fillText(label, 40, HUD_TOP + 18);
+  ctx.restore();
 }
 
 function drawSoloHud() {
@@ -2088,7 +2204,7 @@ function drawThemeBanner(now) {
 }
 
 // Contador de FPS/TPS para verificar el loop (tecla D)
-const perf = { frames: 0, ticks: 0, fps: 0, tps: 0, lastSample: performance.now() };
+const perf = { frames: 0, ticks: 0, fps: 0, tps: 0, errorsTotal: 0, lastSample: performance.now() };
 
 function drawDebug() {
   ctx.save();
@@ -2161,6 +2277,7 @@ function frame(now) {
   } catch (err) {
     // Un frame fallido no puede matar el stream, pero el error queda visible en consola
     consecutiveFrameErrors++;
+    perf.errorsTotal++;
     console.error(`[frame error] (${consecutiveFrameErrors} seguidos)`, err);
     if (consecutiveFrameErrors > MAX_CONSECUTIVE_FRAME_ERRORS) {
       console.error(`[frame error] más de ${MAX_CONSECUTIVE_FRAME_ERRORS} errores seguidos: reiniciando partida`);
@@ -2196,4 +2313,6 @@ window.game = {
 
 resetGame();
 requestAnimationFrame(frame);
+loadSettings();
 connectToBridge();
+setInterval(reportGameStatus, GAME_STATUS_INTERVAL_MS);

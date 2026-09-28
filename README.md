@@ -5,16 +5,28 @@ Juego de Snake automatizado (IA) pensado para transmitir 24/7 en TikTok Live, en
 ## Estructura
 
 ```
-game/     juego (HTML5 Canvas + JS vanilla)
-bridge/   puente TikTok Live -> WebSocket (Fase 5)
+game/            juego (HTML5 Canvas + JS vanilla)
+bridge/          servidor local: juego + panel + WebSocket + adaptadores de TikTok
+  adapters/      tiktok.js (live real), mock.js (eventos falsos), simulator.js (panel)
+  control/       panel de control (/control)
+config/          configuración editable sin tocar código (settings.json...)
+docs/            RESEARCH.md (investigación), TASKS.md (lista de tareas)
+logs/, data/     generados por el puente (no van a git)
 ```
 
-## Ejecutar el juego
+## Ejecutar
 
-Abre `game/index.html` directamente en Chrome/Edge (no requiere servidor ni build).
+```
+cd bridge && npm install        # una vez (instala tiktok-live-connector)
+node bridge/tiktok-bridge.js    # desde la raíz del proyecto
+```
 
-Para transmitir: en OBS / TikTok LIVE Studio añade una fuente **Navegador** apuntando al archivo local
-`game/index.html` con tamaño 1080x1920.
+- Juego: **http://localhost:8080/** · Panel: **http://localhost:8080/control**
+- El juego también funciona abriendo `game/index.html` como archivo, pero sin config JSON (Chrome bloquea el `fetch`
+  con `file://`). Desde otro servidor (Live Server) usa `?bridge=ws://localhost:8080`.
+
+Para transmitir: en OBS / TikTok LIVE Studio, fuente de página web/Link con `http://localhost:8080/` a 1080x1920
+(detalles en `docs/RESEARCH.md`).
 
 - Modo: cambia `let MODE = 'PVP'` (o `'SOLO'`) al inicio de `game/game.js`.
 - Tecla `D`: muestra/oculta el contador de FPS (render) y TPS (lógica).
@@ -55,46 +67,67 @@ Para transmitir: en OBS / TikTok LIVE Studio añade una fuente **Navegador** apu
 
 ## Puente TikTok Live (`bridge/`)
 
-```
-node bridge/tiktok-bridge.js                         # modo mock (eventos de prueba cada 3-5 s)
-TIKTOK_USER=usuario node bridge/tiktok-bridge.js     # live real (requiere: cd bridge && npm install)
-```
+Configuración en `.env` en la raíz (copiar de `.env.example`; `.env` no va a git):
 
-- Levanta un servidor WebSocket en `ws://localhost:8080`; el juego se conecta solo y reintenta cada 5 s
-  si el puente no está o se cae. Mientras el puente esté apagado, Chrome escribe "WebSocket connection ... failed"
-  en la consola en cada intento. **No se puede silenciar desde JS**: lo emite la capa de red del navegador
-  (probado con try/catch + `onerror.preventDefault()`, capturando `error` en `window`, WebSocket dentro de un
-  Worker y sondeo previo con `fetch`, que deja su propio "Failed to load resource"). Para ocultarlo en DevTools:
-  ajustes de la consola > "Hide network". En OBS la consola no se ve.
-- **Modo mock**: sin `TIKTOK_USER`, con `--mock`, o si `tiktok-live-connector` no está instalado. Al conectarse
-  el juego manda una secuencia fija (`test1: !team colombia`, una Rosa de `test2`, `test3: !team argentina`)
-  y luego eventos aleatorios.
-- **Con `TIKTOK_USER`**, si la conexión a TikTok falla, reintenta cada 15 s y **no** pasa a mock (para no meter
-  regalos falsos en un directo real).
-- En la terminal del puente se pueden inyectar eventos a mano: `chat test1 !team colombia`,
-  `gift test2 1 5655 Rose`, `like test3 5`, `follow x`, `share x` o un JSON crudo.
-- No usa la dependencia `ws`: trae un servidor WebSocket mínimo propio (solo texto), así el mock funciona sin `npm install`.
+| Variable | Qué es |
+|---|---|
+| `TIKTOK_USER` | cuenta cuyo LIVE se escucha, sin @ |
+| `EULER_SIGN_API_KEY` | opcional: API key del servidor de firma (sube los límites gratuitos) |
+| `BRIDGE_MODE` | `auto` (TikTok si hay usuario, si no mock) · `tiktok` · `mock` |
+| `BRIDGE_PORT` | puerto (por defecto 8080). Siempre escucha solo en 127.0.0.1 |
+
+- **Un solo servidor** en `127.0.0.1:8080`: el juego (`/`), el panel (`/control`), la config (`/config/...`),
+  el catálogo (`/data/gift-catalog.json`), el estado (`/api/status`) y el WebSocket (roles `game` y `control`).
+- **Adaptadores** (`bridge/adapters/`): el juego solo conoce el contrato de eventos; otra plataforma sería otro adaptador.
+  - `tiktok`: tiktok-live-connector **2.x** (`TikTokLiveConnection`). Si el live no está activo o se cae, reintenta
+    con backoff de 5 s a 60 s. Detecta el fin del live. Con `TIKTOK_USER` **nunca** pasa a mock solo.
+  - `mock`: eventos falsos cada 3-5 s (se activa/desactiva desde el panel o con `mock on|off` en la terminal).
+  - `simulator`: eventos manuales desde el panel o la terminal (`chat test1 !team colombia`, `gift test2 1 5 5655 Rose`
+    = 5 rosas en racha, `like test3 100`, `follow x`, `share x`, o un JSON crudo).
+- **Modo descubrimiento** (solo TikTok real): cada evento crudo va a `logs/events-YYYY-MM-DD.jsonl` y cada regalo
+  distinto a `data/gift-catalog.json` (id, nombre, diamantes, imagen, si es de racha, veces visto); las imágenes se
+  cachean en `game/assets/gifts/`. Los logs de más de 7 días se borran solos.
+- **Rachas incrementales**: cada evento de una racha se aplica al instante con las unidades nuevas; el evento final
+  de TikTok (que repite el total) no cuenta doble.
+- **Estado de conexión en el juego**: punto arriba a la izquierda (verde LIVE, amarillo mock/esperando, rojo sin
+  puente). Se oculta con `"showConnectionDot": false` en `config/settings.json`.
+- Mientras el puente esté apagado, Chrome escribe "WebSocket connection ... failed" en la consola en cada intento.
+  **No se puede silenciar desde JS** (lo emite la capa de red del navegador; probado con try/catch +
+  `onerror.preventDefault()`, `error` en `window`, un Worker y sondeo con `fetch`). En DevTools: ajustes de la consola >
+  "Hide network". En OBS la consola no se ve.
 
 ### Contrato de eventos puente -> juego
 
-Cada mensaje es un JSON:
+Eventos de TikTok (llevan `type`); los mensajes del sistema llevan `kind` (`status`, `command`).
 
 ```js
 {
   type: 'gift' | 'like' | 'follow' | 'share' | 'chat',
-  user: string,          // uniqueId de TikTok
-  timestamp: number,     // ms (Date.now() en el puente)
-  diamondCount?: number, // gift: diamantes por unidad
-  giftName?: string,     // gift
-  giftId?: number,       // gift (Rosa = 5655)
-  repeatCount?: number,  // gift: repeticiones en racha (se envía una vez, al terminar la racha)
-  likeCount?: number,    // like
-  message?: string,      // chat
+  source: 'tiktok' | 'mock' | 'simulator',
+  user: string,               // @usuario (sin @)
+  nickname?: string,          // nombre visible
+  userId?: string,
+  profilePictureUrl?: string,
+  timestamp: number,          // ms
+  // gift
+  giftId?: number,            // Rosa = 5655
+  giftName?: string,
+  diamondCount?: number,      // diamantes POR UNIDAD
+  repeatCount?: number,       // unidades NUEVAS en este evento (las rachas llegan en varios eventos)
+  streakTotal?: number,       // acumulado de la racha hasta este evento
+  streakEnd?: boolean,
+  giftImageUrl?: string,
+  // like
+  likeCount?: number,         // likes de este evento
+  totalLikeCount?: number,    // total del live (si TikTok lo manda)
+  // chat
+  message?: string,
+  isModerator?: boolean,      // moderador del live
+  isOwner?: boolean,          // dueño de la cuenta
 }
 ```
 
-En el juego, `handleTikTokEvent(event)` recibe cada evento. Por ahora solo lo registra en consola y atiende
-los comandos de chat:
+En el juego, `handleTikTokEvent(event)` recibe cada evento y atiende los comandos de chat:
 
 - `!team <equipo>`: se une a un equipo del matchup en pantalla (`!team colombia`, `!team arg`, `!team barça`...).
   Los teams se vacían al cambiar de temática. El HUD muestra `TEAMS [bandera] X vs Y [bandera]`.

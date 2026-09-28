@@ -1,2 +1,7 @@
 node_modules/
+# Secretos: nunca en git (usar .env.example como plantilla)
 .env
+# Generados por el puente (modo descubrimiento)
+logs/
+data/
+game/assets/gifts/

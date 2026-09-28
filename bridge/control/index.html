@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Panel Snake TikTok</title>
+  <link rel="stylesheet" href="/control/control.css">
+</head>
+<body>
+  <header>
+    <h1>Panel Snake TikTok</h1>
+    <span id="ws-state" class="pill bad">sin conexión</span>
+  </header>
+
+  <main>
+    <section class="card" id="status-card">
+      <h2>Estado</h2>
+      <dl id="status"></dl>
+      <label class="switch"><input type="checkbox" id="mock-toggle"> Mock automático (eventos falsos cada 3-5 s)</label>
+    </section>
+
+    <section class="card">
+      <h2>Simulador</h2>
+      <div class="row">
+        <label>Usuario <input id="sim-user" value="simulador"></label>
+        <label>Equipo
+          <select id="sim-team">
+            <option value="">sin equipo</option>
+            <option value="p1">equipo 1</option>
+            <option value="p2">equipo 2</option>
+          </select>
+        </label>
+      </div>
+      <h3>Regalo</h3>
+      <div class="row">
+        <label>Diamantes <input id="gift-diamonds" type="number" min="1" value="1"></label>
+        <label>Id <input id="gift-id" type="number" value="5655"></label>
+        <label>Nombre <input id="gift-name" value="Rose"></label>
+        <label>Racha <input id="gift-streak" type="number" min="1" max="500" value="1"></label>
+      </div>
+      <div class="row buttons">
+        <button data-gift="1">Rosa (1)</button>
+        <button data-gift="5">T2 (5)</button>
+        <button data-gift="30">T3 (30)</button>
+        <button data-gift="100">T4 (100)</button>
+        <button data-gift="500">T5 (500)</button>
+        <button id="send-gift" class="primary">Enviar regalo del formulario</button>
+      </div>
+      <h3>Otros eventos</h3>
+      <div class="row buttons">
+        <button data-likes="10">+10 likes</button>
+        <button data-likes="100">+100 likes</button>
+        <button data-likes="1000">+1000 likes</button>
+        <button id="send-follow">Follow</button>
+        <button id="send-share">Share</button>
+      </div>
+      <div class="row">
+        <label class="grow">Chat <input id="chat-msg" placeholder="colombia · !team arg · hola"></label>
+        <button id="send-chat">Enviar chat</button>
+      </div>
+    </section>
+
+    <section class="card wide">
+      <h2>Eventos <small>(últimos 100)</small></h2>
+      <ol id="events"></ol>
+    </section>
+  </main>
+
+  <script src="/control/control.js"></script>
+</body>
+</html>
