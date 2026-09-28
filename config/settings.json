@@ -29,5 +29,8 @@
     "slowMotion": true,
     "slowMotionMs": 400,
     "slowMotionFactor": 0.3
+  },
+  "ops": {
+    "reloadHours": 6
   }
 }

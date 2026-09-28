@@ -42,12 +42,12 @@ Leyenda: `[ ]` pendiente · `[x]` hecho · `[~]` parcial · `[!]` bloqueado (con
 - [x] Commit "engagement: alertas, instrucciones automaticas, metas, ranking, ritmo"
 
 ## Bloque 5: Panel y operación 24/7
-- [ ] 5.1 Panel completo /control (temática, modo, pausa, saltar, recargar mapeo, audio, simulador, estado, resets, bloqueados)
-- [ ] 5.2 Atajos 1/2/3, M, P, N, Z, D, S
-- [ ] 5.3 config/schedule.json (bloques de modo, cambio al terminar ronda, desactivable)
-- [ ] 5.4 bridge/supervisor.js, start-stream.bat (Chrome modo app, user-data-dir propio, flags), recarga suave cada 6 h, topes de memoria
-- [ ] 5.5 docs/RUNBOOK.md para Sebas (arranque, captura en LIVE Studio, energía Windows, checklist, fallos, prueba con el celular)
-- [ ] Commit "ops: panel, simulador, programador, supervisor, runbook"
+- [x] 5.1 Panel completo /control (temática, modo, pausa, saltar, recargar mapeo, audio, simulador, estado, resets, bloqueados)
+- [x] 5.2 Atajos 1/2/3, M, P, N, Z, D, S
+- [x] 5.3 config/schedule.json (bloques de modo, cambio al terminar ronda, desactivable)
+- [x] 5.4 bridge/supervisor.js, start-stream.bat (Chrome modo app, user-data-dir propio, flags), recarga suave cada 6 h, topes de memoria
+- [x] 5.5 docs/RUNBOOK.md para Sebas (arranque, captura en LIVE Studio, energía Windows, checklist, fallos, prueba con el celular)
+- [x] Commit "ops: panel, simulador, programador, supervisor, runbook"
 
 ## Bloque 6: QA end-to-end
 - [ ] 1 Rosa simulada → efecto + alerta + sonido < 300 ms

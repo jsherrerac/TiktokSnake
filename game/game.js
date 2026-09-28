@@ -12,6 +12,7 @@
    - Fase 5: regalos/likes/follows/shares -> efectos (config/gift-mapping.json), cola con prioridad y crédito al donante.
    - Audio: efectos procedurales o CC0 (Kenney), música opcional, voz con plantillas fijas y filtro de nombres.
    - Engagement: feed de avisos, panel rotativo (instrucciones, likes, diamantes, top), intro de ronda, modo inactivo.
+   - Operación 24/7: órdenes del panel, atajos de teclado, programador de modos, recarga suave, topes de memoria.
    ========================================================= */
 
 // ---------- Modo de juego ----------
@@ -148,6 +149,7 @@ async function loadSettings() {
   if (!loaded) return;
   Object.assign(SETTINGS, loaded);
   if (loaded.engagement && typeof loaded.engagement === 'object') Object.assign(ENGAGEMENT, loaded.engagement);
+  if (loaded.ops && typeof loaded.ops === 'object') Object.assign(OPS, loaded.ops);
   // "audio" de settings.json es la base; lo guardado desde el panel en este navegador manda
   if (loaded.audio && typeof loaded.audio === 'object') {
     Object.assign(AUDIO_DEFAULTS, loaded.audio);
@@ -196,6 +198,8 @@ const state = {
   shake: { until: 0, magnitude: 0 },
   audioLocked: false,           // el navegador aún no deja sonar audio (hace falta un clic)
   showSafeZones: false,         // overlay de lo que tapa la UI de TikTok (tecla Z)
+  paused: false,
+  pausedAt: 0,
   introStartedAt: 0,
   roundTeamDiamonds: { p1: 0, p2: 0 }, // diamantes de cada equipo en la ronda (tira y afloja)
   lastCountdownNumber: null,
@@ -933,6 +937,7 @@ function endRound(now) {
 }
 
 function resetGame(now = performance.now()) {
+  checkSchedule();
   state.mode = MODE;
   // Aquí se aplica un cambio de temática pendiente. Los teams son de un matchup concreto: si cambia, se vacían.
   if (state.currentTheme !== state.roundTheme && state.teams.size > 0) {
@@ -1461,6 +1466,29 @@ const CONTROL_COMMANDS = {
   reloadNameFilter: () => loadNameFilter(),
   resetRanking: () => resetSessionDonors(),
   toggleSafeZones: () => (state.showSafeZones = !state.showSafeZones),
+  setTheme: (themeId) => setTheme(themeId),
+  setMode: (mode) => {
+    setNextMode(mode);
+    alignScheduleToMode(mode);
+  },
+  setPaused: (paused) => setPaused(!!paused),
+  togglePause: () => setPaused(!state.paused),
+  skipRound: () => skipRound(),
+  resetScores: () => resetScores(),
+  reloadConfig: () => {
+    loadSettings();
+    loadGiftMapping(true);
+    loadNameFilter();
+    loadSchedule();
+  },
+  setScheduleEnabled: (enabled) => {
+    schedule.enabled = !!enabled && schedule.blocks.length > 0;
+    schedule.blockStartedAt = Date.now();
+  },
+  reloadPage: () => {
+    saveSessionSnapshot();
+    location.reload();
+  },
 };
 
 function handleControlCommand(command, args) {
@@ -1500,6 +1528,14 @@ function reportGameStatus() {
       sounds: [...SOUND_NAMES, 'speedHum'],
     },
     blockedUsers: [...blockedUsers],
+    paused: state.paused,
+    nextMode: MODE,
+    currentTheme: state.currentTheme,
+    themes: Object.fromEntries(Object.entries(THEMES).map(([id, t]) => [id, t.displayName])),
+    teamNames: state.mode === 'PVP' ? { p1: THEMES[state.roundTheme].p1.name, p2: THEMES[state.roundTheme].p2.name } : null,
+    schedule: scheduleStatus(),
+    uptimeMin: Math.round((Date.now() - pageLoadedAt) / 60000),
+    memory: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
   });
 }
 
@@ -3467,8 +3503,225 @@ function maybeStartSlowMotion(now) {
 
 const timeScale = (now) => (now < engagement.slowMoUntil ? ENGAGEMENT.slowMotionFactor : 1);
 
+// ---------- Operación 24/7: pausa, programador de modos, recarga suave, topes de memoria ----------
+const OPS_DEFAULTS = {
+  reloadHours: 6,          // recarga suave de la página cada N horas (al terminar una ronda); 0 = nunca
+};
+const OPS = { ...OPS_DEFAULTS };
+const SNAPSHOT_KEY = 'snakeTikTok.sessionSnapshot';
+const SNAPSHOT_MAX_AGE_MS = 2 * 60 * 1000;
+const MAX_TRACKED_USERS = 5000; // equipos y usuarios conocidos (se descartan los más viejos)
+const MAX_PARTICLES = 1500;
+const MAX_SESSION_DONORS = 2000;
+const pageLoadedAt = Date.now();
+
+// ---------- Pausa ----------
+// Congela la simulación (culebras, cola de efectos, intro y cuenta atrás); al reanudar se corren los relojes.
+function setPaused(paused, now = performance.now()) {
+  if (paused === state.paused) return;
+  if (paused) {
+    state.paused = true;
+    state.pausedAt = now;
+    stopAllHums();
+    console.info('[panel] juego en PAUSA');
+    return;
+  }
+  const delta = now - state.pausedAt;
+  state.paused = false;
+  state.introStartedAt += delta;
+  state.deathAt += delta;
+  if (state.dance) state.dance.startedAt += delta;
+  for (const item of state.items) if (item.expiresAt !== null) item.expiresAt += delta;
+  for (const effect of state.activeEffects) effect.until += delta;
+  engagement.lastEventAt += delta;
+  console.info('[panel] juego reanudado');
+}
+
+function drawPauseOverlay() {
+  if (!state.paused) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+  ctx.fillRect(0, GRID_Y, CANVAS_WIDTH, ROWS * CELL);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  drawOutlinedText('⏸ PAUSA', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, `900 110px ${HUD_FONT}`, '#ffffff', 14);
+  ctx.restore();
+}
+
+// Salta la ronda en curso (sin sumar al marcador)
+function skipRound(now = performance.now()) {
+  console.info(`[panel] ronda ${state.round} saltada`);
+  endDanceAndEffects();
+  resetGame(now);
+}
+
+function endDanceAndEffects() {
+  stopDanceLoop();
+  stopAllHums();
+}
+
+// Cambia el modo para la siguiente ronda, con cartel
+function setNextMode(mode, reason = 'panel') {
+  if (mode !== 'PVP' && mode !== 'SOLO') return false;
+  if (mode === MODE) return true;
+  MODE = mode;
+  showAnnouncement(`PRÓXIMA RONDA: MODO ${mode === 'PVP' ? 'PvP' : 'SOLO'}`, { color: GOLD, durationMs: 2500 });
+  playSound('themeChange');
+  console.info(`[modo] ${reason}: la próxima ronda será ${mode}`);
+  return true;
+}
+
+function resetScores() {
+  state.stats = {};
+  saveStats(state.stats);
+  state.bestScore = 0;
+  saveBestScore(0);
+  console.info('[panel] marcadores y récord reiniciados');
+}
+
+// ---------- Programador de modos (config/schedule.json) ----------
+// Bloques que se repiten (ej. PVP 90 min -> SOLO 20 min). El cambio se aplica al empezar la siguiente ronda.
+const schedule = { enabled: false, blocks: [], index: 0, blockStartedAt: Date.now() };
+
+async function loadSchedule() {
+  const loaded = await loadConfigJson('schedule.json');
+  if (!loaded || !Array.isArray(loaded.blocks) || loaded.blocks.length === 0) return;
+  schedule.enabled = loaded.enabled !== false;
+  schedule.blocks = loaded.blocks.filter((b) => (b.mode === 'PVP' || b.mode === 'SOLO') && b.minutes > 0);
+  if (!schedule.enabled || !schedule.blocks.length) return;
+  // Solo la primera carga (sin sesión restaurada) arranca en el primer bloque; recargar la config no mueve el programador
+  if (!schedule.restored && !schedule.loadedOnce) {
+    schedule.index = 0;
+    schedule.blockStartedAt = Date.now();
+    if (schedule.blocks[0].mode !== MODE) setNextMode(schedule.blocks[0].mode, 'programador');
+  }
+  schedule.index = Math.min(schedule.index, schedule.blocks.length - 1);
+  schedule.loadedOnce = true;
+  console.info(`[programador] ${schedule.blocks.map((b) => `${b.mode} ${b.minutes} min`).join(' -> ')}`);
+}
+
+// Se llama al empezar cada ronda: si el bloque actual ya cumplió su tiempo, pasa al siguiente
+function checkSchedule() {
+  if (!schedule.enabled || !schedule.blocks.length) return;
+  const block = schedule.blocks[schedule.index];
+  if (Date.now() - schedule.blockStartedAt < block.minutes * 60000) return;
+  schedule.index = (schedule.index + 1) % schedule.blocks.length;
+  schedule.blockStartedAt = Date.now();
+  setNextMode(schedule.blocks[schedule.index].mode, 'programador');
+}
+
+// Un cambio manual de modo reinicia el bloque del programador en el primer bloque de ese modo
+function alignScheduleToMode(mode) {
+  if (!schedule.enabled) return;
+  const i = schedule.blocks.findIndex((b) => b.mode === mode);
+  if (i >= 0) {
+    schedule.index = i;
+    schedule.blockStartedAt = Date.now();
+  }
+}
+
+function scheduleStatus() {
+  if (!schedule.enabled || !schedule.blocks.length) return null;
+  const block = schedule.blocks[schedule.index];
+  const leftMin = Math.max(0, block.minutes - (Date.now() - schedule.blockStartedAt) / 60000);
+  const next = schedule.blocks[(schedule.index + 1) % schedule.blocks.length];
+  return { current: block.mode, minutesLeft: Math.round(leftMin), next: next.mode };
+}
+
+// ---------- Recarga suave cada N horas, sin perder la sesión ----------
+function saveSessionSnapshot() {
+  const snapshot = {
+    at: Date.now(),
+    round: state.round,
+    mode: MODE,
+    currentTheme: state.currentTheme,
+    teams: [...state.teams],
+    knownUsers: [...state.knownUsers].slice(-MAX_TRACKED_USERS),
+    likes: state.likes,
+    lastThemeRotationWall: Date.now() - (performance.now() - state.lastThemeRotationAt),
+    schedule: { index: schedule.index, blockStartedAt: schedule.blockStartedAt },
+  };
+  try {
+    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+  } catch (e) {
+    /* sin persistencia */
+  }
+}
+
+function restoreSessionSnapshot() {
+  let snap;
+  try {
+    snap = JSON.parse(localStorage.getItem(SNAPSHOT_KEY));
+    localStorage.removeItem(SNAPSHOT_KEY);
+  } catch (e) {
+    return;
+  }
+  if (!snap || Date.now() - snap.at > SNAPSHOT_MAX_AGE_MS) return;
+  state.round = snap.round;
+  MODE = snap.mode;
+  if (THEMES[snap.currentTheme]) {
+    state.currentTheme = snap.currentTheme;
+    state.roundTheme = snap.currentTheme;
+  }
+  state.teams = new Map(snap.teams);
+  state.knownUsers = new Set(snap.knownUsers);
+  Object.assign(state.likes, snap.likes);
+  state.lastThemeRotationAt = performance.now() - (Date.now() - snap.lastThemeRotationWall);
+  schedule.index = snap.schedule.index;
+  schedule.blockStartedAt = snap.schedule.blockStartedAt;
+  schedule.restored = true;
+  console.info(`[recarga] sesión restaurada (ronda ${snap.round}, ${state.teams.size} en equipos)`);
+}
+
+// Al terminar una ronda (en la pantalla de fin): si toca, guarda la sesión y recarga
+function maybeSoftReload() {
+  if (!OPS.reloadHours || Date.now() - pageLoadedAt < OPS.reloadHours * 3600 * 1000) return false;
+  console.info(`[recarga] ${OPS.reloadHours} h de juego: recarga suave`);
+  saveSessionSnapshot();
+  location.reload();
+  return true;
+}
+
+// ---------- Topes de memoria (24/7) ----------
+function enforceMemoryCaps() {
+  if (state.particles.length > MAX_PARTICLES) state.particles.splice(0, state.particles.length - MAX_PARTICLES);
+  if (state.teams.size > MAX_TRACKED_USERS) {
+    const extra = state.teams.size - MAX_TRACKED_USERS;
+    let i = 0;
+    for (const key of state.teams.keys()) {
+      if (i++ >= extra) break;
+      state.teams.delete(key);
+    }
+  }
+  if (state.knownUsers.size > MAX_TRACKED_USERS) {
+    const keep = [...state.knownUsers].slice(-MAX_TRACKED_USERS);
+    state.knownUsers = new Set(keep);
+  }
+  if (engagement.sessionDonors.size > MAX_SESSION_DONORS) {
+    const top = [...engagement.sessionDonors.entries()].sort((a, b) => b[1] - a[1]).slice(0, MAX_SESSION_DONORS / 2);
+    engagement.sessionDonors = new Map(top);
+  }
+}
+
+// ---------- Atajos de teclado en la ventana del juego (respaldo del panel) ----------
+function handleShortcut(e) {
+  const key = e.key.toLowerCase();
+  const themeIds = Object.keys(THEMES);
+  if (['1', '2', '3'].includes(key) && themeIds[Number(key) - 1]) setTheme(themeIds[Number(key) - 1]);
+  else if (key === 'm') {
+    const next = MODE === 'PVP' ? 'SOLO' : 'PVP';
+    setNextMode(next, 'tecla M');
+    alignScheduleToMode(next);
+  } else if (key === 'p') setPaused(!state.paused);
+  else if (key === 'n') skipRound();
+  else if (key === 'z') state.showSafeZones = !state.showSafeZones;
+  else if (key === 'd') state.debug = !state.debug;
+  else if (key === 's') setAudioSettings({ muted: !audio.settings.muted });
+}
+
 // ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
 function spawnBurst(x, y, color, count) {
+  if (state.particles.length > MAX_PARTICLES) return;
   for (let i = 0; i < count; i++) {
     const angle = Math.random() * Math.PI * 2;
     const speed = 120 + Math.random() * 260;
@@ -4393,6 +4646,7 @@ function render(now) {
   drawRoundIntro(now);
   drawAnnouncements(now);
   drawThemeBanner(now);
+  drawPauseOverlay();
   drawSafeZones();
   if (state.debug) drawDebug();
   drawAudioUnlock();
@@ -4415,7 +4669,9 @@ function frame(now) {
     state.now = now;
     // Cámara lenta (muerte que decide la ronda): el juego avanza más despacio un momento
     const simDt = dt * timeScale(now);
-    if (isRoundActive()) {
+    if (state.paused) {
+      // En pausa solo se dibuja
+    } else if (isRoundActive()) {
       for (const snake of state.snakes) {
         if (canMove(snake)) snake.moveAccumulator += simDt;
       }
@@ -4424,11 +4680,14 @@ function frame(now) {
     } else if (state.phase === 'intro') {
       updateIntro(now);
     } else if (now - state.deathAt >= RESTART_DELAY_MS) {
-      resetGame(now);
+      if (!maybeSoftReload()) resetGame(now);
     }
 
-    processEffectQueue(now, dt);
-    updateIdle(now);
+    if (!state.paused) {
+      processEffectQueue(now, dt);
+      updateIdle(now);
+    }
+    if (perf.frames === 0) enforceMemoryCaps();
     updateThemeRotation(now);
     updateParticles(simDt);
     render(now);
@@ -4462,11 +4721,9 @@ function frame(now) {
   }
 }
 
-// Tecla D: mostrar/ocultar FPS (solo para pruebas; el juego no necesita input)
-window.addEventListener('keydown', (e) => {
-  if (e.key === 'd' || e.key === 'D') state.debug = !state.debug;
-  if (e.key === 'z' || e.key === 'Z') state.showSafeZones = !state.showSafeZones;
-});
+// Teclas (el juego no las necesita; son respaldo del panel)
+// Atajos: 1/2/3 temáticas, M modo, P pausa, N siguiente ronda, Z zonas seguras, D debug, S silencio
+window.addEventListener('keydown', handleShortcut);
 
 // Acceso desde la consola del navegador para pruebas:
 //   game.state, game.resetGame(), game.setTheme('real-barca'),
@@ -4479,12 +4736,14 @@ window.game = {
   handleTikTokEvent, registerTeam, getTeamCounts, triggerVictoryDance, checkVictoryInminent, loadGiftMapping,
   get GIFT_MAPPING() { return GIFT_MAPPING; },
   playSound, say, setAudioSettings, spokenName, displayHandle, isNameOffensive, audio, engagement, ENGAGEMENT, topDonors,
+  setPaused, skipRound, setNextMode, schedule, OPS,
   THEMES, FLAG_RENDERERS, ITEM_TYPES, AI_CONFIG, DANCE_PATTERNS,
 };
 
 loadBlockedUsers();
 buildBannedMatchers();
 loadSessionDonors();
+restoreSessionSnapshot();
 initAudio();
 resetGame();
 requestAnimationFrame(frame);
@@ -4492,6 +4751,7 @@ loadSettings();
 loadNameFilter();
 loadGiftCatalog();
 setInterval(loadGiftCatalog, 60000);
+loadSchedule();
 loadGiftMapping();
 connectToBridge();
 setInterval(reportGameStatus, GAME_STATUS_INTERVAL_MS);

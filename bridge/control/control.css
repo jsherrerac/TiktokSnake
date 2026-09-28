@@ -109,3 +109,6 @@ dd { margin: 0; overflow-wrap: anywhere; }
 #events .src { color: var(--muted); }
 
 input[type="range"] { width: 120px; padding: 0; }
+
+.hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+header .pill { margin-left: 4px; }

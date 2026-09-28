@@ -16,9 +16,14 @@ logs/, data/     generados por el puente (no van a git)
 
 ## Ejecutar
 
+Para transmitir: **`start-stream.bat`** (abre puente con supervisor, juego y panel) y **`stop-stream.bat`** (cierra todo).
+Manual de operación paso a paso: **`docs/RUNBOOK.md`**.
+
+A mano (desarrollo):
+
 ```
 cd bridge && npm install        # una vez (instala tiktok-live-connector)
-node bridge/tiktok-bridge.js    # desde la raíz del proyecto
+node bridge/tiktok-bridge.js    # desde la raíz del proyecto (o bridge/supervisor.js para que se reinicie solo)
 ```
 
 - Juego: **http://localhost:8080/** · Panel: **http://localhost:8080/control**
@@ -115,6 +120,18 @@ Todo es editable en el JSON y se recarga desde el panel ("Recargar gift-mapping.
 - Tecla **Z**: overlay de las zonas que tapa la UI de TikTok (aproximadas, ver `docs/RESEARCH.md`).
 - Ajustes en `config/settings.json` → `"engagement"` (tiempos, textos de los llamados, activar/desactivar paneles).
 
+### Panel de control y operación 24/7
+
+- **Panel** (`/control`, en otra ventana, nunca en una pestaña junto al juego): temática y modo de la siguiente ronda,
+  pausa, saltar ronda, recargar config, zonas seguras, audio, simulador (tiers, catálogo real, rachas, likes, follow,
+  share, chat, ráfaga caos, mock), moderación (bloqueados), reinicio de top y marcadores, estado de todo.
+- **Atajos** en la ventana del juego: 1/2/3 temáticas · M modo · P pausa · N siguiente ronda · Z zonas · D debug · S silencio.
+- **Programador de modos** (`config/schedule.json`): bloques que se repiten (PVP 90 min → SOLO 20 min); el cambio se
+  aplica al terminar la ronda, con cartel. Desactivable desde el panel.
+- **`bridge/supervisor.js`**: reinicia el puente si se cae (1 s → 30 s) y guarda sus logs en `logs/bridge-*.log`.
+- **Recarga suave** cada 6 h (`ops.reloadHours`), al terminar una ronda, sin perder marcadores, equipos, likes ni ranking.
+- Topes de memoria: partículas, avisos, carteles, usuarios conocidos, equipos y donadores.
+
 ## Puente TikTok Live (`bridge/`)
 
 Configuración en `.env` en la raíz (copiar de `.env.example`; `.env` no va a git):
@@ -192,5 +209,5 @@ Desde la consola del juego: `game.handleTikTokEvent({type: 'chat', user: 'x', me
 - [x] Fase 2: modo PvP
 - [x] Fase 3: temáticas (banderas en canvas, HUD bajo la barra de TikTok)
 - [x] Fase 4: items
-- [ ] Fase 5: puente TikTok Live
+- [x] Fase 5: puente TikTok Live (falta la prueba con un live real)
 - [x] Fase 6: victory dance

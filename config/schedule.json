@@ -1,0 +1,12 @@
+{
+  "_info": [
+    "Programador de modos: bloques que se repiten en orden. El cambio se aplica al terminar la ronda en curso, con cartel.",
+    "mode: PVP o SOLO. minutes: duración del bloque. enabled: false para desactivarlo (también desde el panel).",
+    "Si cambias el modo a mano (panel o tecla M), el programador sigue desde el primer bloque de ese modo."
+  ],
+  "enabled": true,
+  "blocks": [
+    { "mode": "PVP", "minutes": 90 },
+    { "mode": "SOLO", "minutes": 20 }
+  ]
+}

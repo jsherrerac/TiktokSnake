@@ -11,59 +11,51 @@
   <header>
     <h1>Panel Snake TikTok</h1>
     <span id="ws-state" class="pill bad">sin conexión</span>
+    <span id="tiktok-pill" class="pill warn">TikTok: —</span>
+    <span id="game-pill" class="pill bad">juego: —</span>
   </header>
 
   <main>
+    <!-- Estado -->
     <section class="card" id="status-card">
       <h2>Estado</h2>
       <dl id="status"></dl>
-      <label class="switch"><input type="checkbox" id="mock-toggle"> Mock automático (eventos falsos cada 3-5 s)</label>
-      <div class="row buttons" style="margin-top:8px">
-        <button id="reload-mapping">Recargar gift-mapping.json</button>
-      </div>
     </section>
 
+    <!-- Juego -->
     <section class="card">
-      <h2>Simulador</h2>
+      <h2>Juego</h2>
       <div class="row">
-        <label>Usuario <input id="sim-user" value="simulador"></label>
-        <label>Equipo
-          <select id="sim-team">
-            <option value="">sin equipo</option>
-            <option value="p1">equipo 1</option>
-            <option value="p2">equipo 2</option>
+        <label>Temática (siguiente ronda)
+          <select id="theme-select"></select>
+        </label>
+        <label>Modo (siguiente ronda)
+          <select id="mode-select">
+            <option value="PVP">PvP (2 culebras)</option>
+            <option value="SOLO">SOLO (1 culebra)</option>
           </select>
         </label>
       </div>
-      <h3>Regalo</h3>
-      <div class="row">
-        <label>Diamantes <input id="gift-diamonds" type="number" min="1" value="1"></label>
-        <label>Id <input id="gift-id" type="number" value="5655"></label>
-        <label>Nombre <input id="gift-name" value="Rose"></label>
-        <label>Racha <input id="gift-streak" type="number" min="1" max="500" value="1"></label>
+      <div class="row buttons">
+        <button id="pause-btn">⏸ Pausar</button>
+        <button id="skip-btn">⏭ Saltar ronda</button>
+        <button id="zones-btn">Zonas seguras (Z)</button>
       </div>
       <div class="row buttons">
-        <button data-gift="1">Rosa (1)</button>
-        <button data-gift="5">T2 (5)</button>
-        <button data-gift="30">T3 (30)</button>
-        <button data-gift="100">T4 (100)</button>
-        <button data-gift="500">T5 (500)</button>
-        <button id="send-gift" class="primary">Enviar regalo del formulario</button>
+        <button id="reload-mapping">Recargar gift-mapping.json</button>
+        <button id="reload-config">Recargar toda la config</button>
+        <label class="switch"><input type="checkbox" id="schedule-toggle"> Programador de modos</label>
       </div>
-      <h3>Otros eventos</h3>
+      <h3>Reinicios</h3>
       <div class="row buttons">
-        <button data-likes="10">+10 likes</button>
-        <button data-likes="100">+100 likes</button>
-        <button data-likes="1000">+1000 likes</button>
-        <button id="send-follow">Follow</button>
-        <button id="send-share">Share</button>
+        <button id="reset-ranking" class="danger">Reiniciar top donadores</button>
+        <button id="reset-scores" class="danger">Reiniciar marcadores</button>
+        <button id="reload-page" class="danger">Recargar el juego</button>
       </div>
-      <div class="row">
-        <label class="grow">Chat <input id="chat-msg" placeholder="colombia · !team arg · hola"></label>
-        <button id="send-chat">Enviar chat</button>
-      </div>
+      <p class="hint">Atajos en la ventana del juego: 1/2/3 temáticas · M modo · P pausa · N siguiente ronda · Z zonas · D debug · S silencio</p>
     </section>
 
+    <!-- Audio -->
     <section class="card" id="audio-card">
       <h2>Audio <small id="audio-state"></small></h2>
       <div class="row">
@@ -94,7 +86,54 @@
       </div>
       <h3>Escuchar cada sonido</h3>
       <div class="row buttons" id="sound-buttons"></div>
-      <h3>Usuarios bloqueados <small>(no se muestran ni se leen; sus regalos funcionan igual, anónimos)</small></h3>
+    </section>
+
+    <!-- Simulador -->
+    <section class="card">
+      <h2>Simulador <small>(eventos falsos: no usar con el live real en marcha)</small></h2>
+      <div class="row">
+        <label>Usuario <input id="sim-user" value="simulador"></label>
+        <label>Equipo
+          <select id="sim-team">
+            <option value="">sin equipo</option>
+            <option value="p1">equipo 1</option>
+            <option value="p2">equipo 2</option>
+          </select>
+        </label>
+        <label>Racha <input id="gift-streak" type="number" min="1" max="500" value="1"></label>
+      </div>
+      <h3>Regalo por tier</h3>
+      <div class="row buttons">
+        <button data-gift="1">T1 · Rosa (1💎)</button>
+        <button data-gift="5">T2 (5💎)</button>
+        <button data-gift="30">T3 (30💎)</button>
+        <button data-gift="100">T4 (100💎)</button>
+        <button data-gift="500">T5 (500💎)</button>
+      </div>
+      <h3>Regalo del catálogo <small id="catalog-info"></small></h3>
+      <div class="row">
+        <label class="grow">Regalo <select id="catalog-select"></select></label>
+        <button id="send-catalog-gift" class="primary">Enviar</button>
+      </div>
+      <h3>Otros eventos</h3>
+      <div class="row buttons">
+        <button data-likes="100">+100 likes</button>
+        <button data-likes="1000">+1000 likes</button>
+        <button id="send-follow">Follow</button>
+        <button id="send-share">Share</button>
+        <button id="chaos-burst" class="danger">Ráfaga caos (50 regalos en 10 s)</button>
+      </div>
+      <div class="row">
+        <label class="grow">Chat <input id="chat-msg" placeholder="colombia · !team arg · hola"></label>
+        <button id="send-chat">Enviar chat</button>
+      </div>
+      <label class="switch"><input type="checkbox" id="mock-toggle"> Mock automático (eventos falsos cada 3-5 s)</label>
+    </section>
+
+    <!-- Moderación -->
+    <section class="card">
+      <h2>Moderación</h2>
+      <p class="hint">Usuarios bloqueados: sus nombres no se muestran ni se leen (salen como "anónimo"); sus regalos funcionan igual.</p>
       <div class="row">
         <label class="grow">Usuario <input id="block-user" placeholder="usuario sin @"></label>
         <button id="block-add" class="danger">Bloquear</button>
@@ -102,6 +141,7 @@
       <div class="row buttons" id="blocked-list"></div>
     </section>
 
+    <!-- Eventos -->
     <section class="card wide">
       <h2>Eventos <small>(últimos 100)</small></h2>
       <ol id="events"></ol>
