@@ -79,6 +79,10 @@ function renderStatus() {
   if (lastGame) {
     const age = Math.round((Date.now() - lastGame.at) / 1000);
     rows.push(['Juego', `${lastGame.fps} fps · ronda ${lastGame.round} (${lastGame.phase}) · ${lastGame.mode} · ${lastGame.theme} · errores ${lastGame.errors} · hace ${age}s`]);
+    if (lastGame.metrics) {
+      const m = lastGame.metrics;
+      rows.push(['Cola', `${lastGame.queue} pendientes · regalos ${m.gifts} (${m.units} unidades) · efectos ${m.effects} · a puntos ${m.overflow}`]);
+    }
   }
   $('#status').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('');
   $('#mock-toggle').checked = !!s.mock.enabled;
@@ -152,5 +156,6 @@ $('#send-chat').addEventListener('click', () => {
   if (message) simulate({ type: 'chat', user: simUser(), message });
 });
 $('#mock-toggle').addEventListener('change', (e) => send({ kind: 'mock', enabled: e.target.checked }));
+$('#reload-mapping').addEventListener('click', () => command('reloadMapping'));
 
 connect();

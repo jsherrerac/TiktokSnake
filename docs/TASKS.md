@@ -13,17 +13,17 @@ Leyenda: `[ ]` pendiente · `[x]` hecho · `[~]` parcial · `[!]` bloqueado (con
 - [x] 1.1 Adaptadores bridge/adapters/{tiktok,mock,simulator}.js + panel /control mínimo
 - [x] 1.2 Servidor único 127.0.0.1:8080: juego por HTTP, /control, WebSocket con roles game/control
 - [x] 1.3 .env (TIKTOK_USER, firma, modo, puerto), .env.example, .gitignore
-- [x] 1.4 Descubrimiento: logs/events-YYYY-MM-DD.jsonl, data/gift-catalog.json, lista de regalos + imágenes en game/assets/gifts/, borrar logs > 7 días
+- [~] 1.4 Descubrimiento (código listo; sin eventos reales hasta la prueba con el celular): logs/events-YYYY-MM-DD.jsonl, data/gift-catalog.json, lista de regalos + imágenes en game/assets/gifts/, borrar logs > 7 días
 - [x] 1.5 Rachas incrementales (delta de repeatCount, sin doble conteo)
 - [x] 1.6 Robustez: backoff 5 s → 60 s, fin de live, estado al juego (punto verde/rojo ocultable), nunca mock automático con TIKTOK_USER
 - [x] Commit "bridge: adaptadores, servidor local, descubrimiento, rachas incrementales"
 
 ## Bloque 2: Mapeo de regalos + cola
-- [ ] 2.1 config/gift-mapping.json (tiers PVP/SOLO, likes, follow, share, overrides), recargable desde el panel
-- [ ] 2.2 Equipos sin fricción (alias a secas, reglas anti-falsos positivos); !theme solo dueño/moderadores
-- [ ] 2.3 Cola con prioridad y tope por segundo; topes de items por tipo → puntos; nada se pierde; nunca sobre cabeza/ocupada; bombas teledirigidas a ≥ 2
-- [ ] 2.4 Crédito al donante: meta en items, @usuario sobre items T3+, "💥 @x eliminó a Y", MVP de la ronda
-- [ ] Commit "fase 5: mapeo configurable, cola de eventos, credito al donante"
+- [x] 2.1 config/gift-mapping.json (tiers PVP/SOLO, likes, follow, share, overrides), recargable desde el panel
+- [x] 2.2 Equipos sin fricción (alias a secas, reglas anti-falsos positivos); !theme solo dueño/moderadores
+- [x] 2.3 Cola con prioridad y tope por segundo; topes de items por tipo → puntos; nada se pierde; nunca sobre cabeza/ocupada; bombas teledirigidas a ≥ 2
+- [x] 2.4 Crédito al donante: meta en items, @usuario sobre items T3+, "💥 @x eliminó a Y", MVP de la ronda
+- [x] Commit "fase 5: mapeo configurable, cola de eventos, credito al donante"
 
 ## Bloque 3: Audio
 - [ ] 3.1 AudioManager (buses sfx/music/tts, maestro, mute, control desde el panel)

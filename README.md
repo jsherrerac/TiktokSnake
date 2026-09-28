@@ -65,6 +65,30 @@ Para transmitir: en OBS / TikTok LIVE Studio, fuente de página web/Link con `ht
 - Consola: `game.triggerVictoryDance(game.state.snakes[0], 'heart')`. Umbrales en `VICTORY_MIN_SCORE`,
   `VICTORY_RIVAL_DEAD_MS` y `DANCE_DURATION_MS`.
 
+### Regalos, likes, follows y shares (`config/gift-mapping.json`)
+
+Todo es editable en el JSON y se recarga desde el panel ("Recargar gift-mapping.json") sin reiniciar.
+
+| Tier (diamantes por unidad) | PVP (con equipo) | SOLO |
+|---|---|---|
+| T1 (1-4) | comida extra cerca de tu culebra | comida o velocidad |
+| T2 (5-29) | velocidad para tu culebra | un muro |
+| T3 (30-99) | muro de 3 delante del rival | 3 bombas |
+| T4 (100-499) | bomba teledirigida al rival (su IA no la ve) | CAOS |
+| T5 (500+) | ATAQUE ÉPICO: 3 bombas teledirigidas + 3 comidas + cartel y temblor | CAOS épico |
+
+- Sin equipo en PVP: T1-T2 dan comida en el centro; T3+ hacen el efecto de SOLO.
+- Una racha de N regalos = N efectos. `overrides` fuerza un tier por id o nombre de regalo.
+- Likes (PVP): cada 300 likes de un equipo, comida para su culebra; cada 1000 likes totales, lluvia de comida.
+  SOLO: cada 100 likes, una comida. Follow: comida en el centro y aviso de agradecimiento. Share: velocidad.
+- **Cola**: T5 primero, máximo `maxEffectsPerSecond` efectos por segundo; espera durante la cuenta atrás y la danza.
+  **Topes** por tipo de item (`caps`); lo que no cabe se convierte en puntos (`overflowPoints`). Nada se pierde en silencio.
+- **Equipos**: "!team colombia" o simplemente escribir "colombia", "col", "dale arg" (si el mensaje empieza por el
+  equipo, o tiene 3 palabras o menos y nombra un solo equipo). `!theme` solo dueño y moderadores
+  (`chatThemeCommand` en `config/settings.json`: `mods` · `all` · `off`).
+- **Crédito**: los items de regalos T3+ muestran el @usuario; si uno mata a una culebra sale
+  "💥 @usuario eliminó a X" (o "¡Fuego amigo!"); al final de la ronda, el MVP (quien más diamantes regaló).
+
 ## Puente TikTok Live (`bridge/`)
 
 Configuración en `.env` en la raíz (copiar de `.env.example`; `.env` no va a git):

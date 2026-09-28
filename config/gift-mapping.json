@@ -1,0 +1,116 @@
+{
+  "_info": [
+    "Qué hace cada regalo, like, follow y share. Se edita sin tocar código y se recarga desde el panel.",
+    "El tier se elige por los diamantes de UNA unidad del regalo (una racha de 10 rosas = 10 efectos T1).",
+    "overrides fuerza un tier por id de regalo o por nombre (ej. \"byGiftId\": { \"5655\": \"T2\" }).",
+    "Acciones: megaFood, speed, wallLine, wall, homingBomb, bomb, random, epic, points.",
+    "Objetivos (target): ally = culebra del equipo del donante, rival = la otra, center, random, userTeam.",
+    "text: lo que se muestra en las instrucciones en pantalla (se generan solas desde este archivo)."
+  ],
+  "tiers": [
+    { "id": "T1", "minDiamonds": 1, "label": "pequeño" },
+    { "id": "T2", "minDiamonds": 5, "label": "mediano" },
+    { "id": "T3", "minDiamonds": 30, "label": "grande" },
+    { "id": "T4", "minDiamonds": 100, "label": "enorme" },
+    { "id": "T5", "minDiamonds": 500, "label": "épico" }
+  ],
+  "overrides": {
+    "byGiftId": {},
+    "byName": {}
+  },
+  "pvp": {
+    "T1": { "text": "comida extra para tu equipo", "actions": [{ "do": "megaFood", "target": "ally" }] },
+    "T2": { "text": "velocidad para tu equipo", "actions": [{ "do": "speed", "target": "ally" }] },
+    "T3": {
+      "text": "muro delante del rival",
+      "actions": [{ "do": "wallLine", "target": "rival", "length": 3, "minDistance": 3, "maxDistance": 4 }]
+    },
+    "T4": {
+      "text": "bomba teledirigida al rival",
+      "actions": [{ "do": "homingBomb", "target": "rival", "pattern": "ahead", "distance": 2 }]
+    },
+    "T5": {
+      "text": "ATAQUE ÉPICO: 3 bombas al rival + 3 comidas",
+      "actions": [
+        { "do": "homingBomb", "target": "rival", "pattern": "trap", "distance": 2 },
+        { "do": "megaFood", "target": "ally", "count": 3 },
+        { "do": "epic" }
+      ]
+    }
+  },
+  "pvpNoTeam": {
+    "T1": { "text": "comida en el centro", "actions": [{ "do": "megaFood", "target": "center" }] },
+    "T2": { "text": "comida en el centro", "actions": [{ "do": "megaFood", "target": "center" }] },
+    "T3": { "useSolo": true },
+    "T4": { "useSolo": true },
+    "T5": { "useSolo": true }
+  },
+  "solo": {
+    "T1": {
+      "text": "comida o velocidad",
+      "actions": [{ "do": "random", "options": [{ "do": "megaFood", "target": "random" }, { "do": "speed", "target": "ally" }] }]
+    },
+    "T2": { "text": "un muro", "actions": [{ "do": "wall", "target": "random" }] },
+    "T3": { "text": "3 bombas", "actions": [{ "do": "bomb", "target": "random", "count": 3 }] },
+    "T4": {
+      "text": "CAOS: bombas, muros y comida",
+      "actions": [
+        { "do": "bomb", "target": "random", "count": 5 },
+        { "do": "wall", "target": "random", "count": 3 },
+        { "do": "megaFood", "target": "random", "count": 2 }
+      ]
+    },
+    "T5": {
+      "text": "CAOS ÉPICO",
+      "actions": [
+        { "do": "bomb", "target": "random", "count": 5 },
+        { "do": "wall", "target": "random", "count": 3 },
+        { "do": "megaFood", "target": "random", "count": 2 },
+        { "do": "epic" }
+      ]
+    }
+  },
+  "likes": {
+    "pvp": {
+      "teamGoal": 300,
+      "teamText": "comida para tu equipo",
+      "teamActions": [{ "do": "megaFood", "target": "ally" }],
+      "globalGoal": 1000,
+      "globalText": "lluvia de comida",
+      "globalActions": [{ "do": "megaFood", "target": "center", "count": 5 }]
+    },
+    "solo": {
+      "goal": 100,
+      "text": "comida extra",
+      "actions": [{ "do": "megaFood", "target": "random" }]
+    }
+  },
+  "follow": {
+    "text": "¡Gracias por seguir, @{user}!",
+    "actions": [{ "do": "megaFood", "target": "center" }]
+  },
+  "share": {
+    "text": "velocidad para tu equipo",
+    "actions": [{ "do": "speed", "target": "userTeam" }]
+  },
+  "queue": {
+    "maxEffectsPerSecond": 10,
+    "maxLength": 1500
+  },
+  "caps": {
+    "BOMB": 8,
+    "WALL": 6,
+    "MEGA_FOOD": 6,
+    "SPEED": 4
+  },
+  "overflowPoints": {
+    "T1": 1,
+    "T2": 2,
+    "T3": 5,
+    "T4": 10,
+    "T5": 25,
+    "like": 1,
+    "follow": 1,
+    "share": 1
+  }
+}

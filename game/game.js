@@ -9,6 +9,7 @@
    - Fase 4: items (mega-food, bomba, speed, wall) y velocidad independiente por serpiente.
    - Fase 5 (base): cliente WebSocket del puente TikTok, dispatcher de eventos y teams por chat (!team).
    - Fase 6: victory dance (la ganadora dibuja una figura con el cuerpo antes de cerrar la ronda).
+   - Fase 5: regalos/likes/follows/shares -> efectos (config/gift-mapping.json), cola con prioridad y crédito al donante.
    ========================================================= */
 
 // ---------- Modo de juego ----------
@@ -121,6 +122,10 @@ const GAME_STATUS_INTERVAL_MS = 2000; // cada cuánto el juego reporta fps/error
 // Valores por defecto; si el juego se sirve por HTTP se sobrescriben con config/settings.json.
 const SETTINGS = {
   showConnectionDot: true, // punto verde/amarillo/rojo del estado de conexión, arriba a la izquierda
+  // Quién puede cambiar la temática con "!theme" en el chat: 'mods' (dueño y moderadores), 'all' u 'off'
+  chatThemeCommand: 'mods',
+  // Unirse a un equipo escribiendo solo el nombre ("colombia", "arg"), además de "!team colombia"
+  joinTeamByName: true,
 };
 
 // Lee un JSON de config/ (solo si el juego se sirve por HTTP; con file:// Chrome bloquea el fetch)
@@ -170,6 +175,15 @@ const state = {
   bridgeStatus: null,           // último estado que manda el puente (TikTok conectado, mock...)
   teams: new Map(),             // username -> 'p1' | 'p2' (se vacía al cambiar de temática)
   knownUsers: new Set(),        // usuarios vistos en cualquier evento de TikTok (para contar neutrales)
+  effectQueue: [],              // efectos de regalos/likes pendientes (ver processEffectQueue)
+  queueTokens: 0,
+  likes: { total: 0, p1: 0, p2: 0, nextGlobal: 0, nextP1: 0, nextP2: 0, nextSolo: 0 },
+  roundDonations: new Map(),    // usuario -> diamantes en la ronda en curso (para el MVP)
+  announcements: [],            // carteles grandes ("💥 @x eliminó a Y", ataque épico)
+  alerts: [],                   // avisos de regalos/follows (el feed visual llega en el Bloque 4)
+  floaters: [],                 // textos "+N" que suben y se desvanecen
+  shake: { until: 0, magnitude: 0 },
+  metrics: { gifts: 0, units: 0, effects: 0, overflow: 0 },
   foods: [],
   items: [],          // { type, x, y, bornAt, expiresAt, meta }
   activeEffects: [],  // { snakeId, type, until }
@@ -329,6 +343,9 @@ function isHeadNextToFood(snake) {
 // - pegados a la cabeza (distancia 1), además pasan la tirada de BOMB_MISS_CHANCE (si falla, no reacciona).
 // La tirada se hace en cada decisión, así que un despiste dura solo ese paso.
 function isItemObstacleForAI(item, viewer) {
+  // Las bombas teledirigidas de un regalo son invisibles para la culebra atacada (si no, casi nunca matarían);
+  // la del equipo del donante las ve con las reglas normales
+  if (item.meta.hiddenFrom === viewer.id) return false;
   let watched = false;
   if (item.type === 'WALL') watched = AI_CONFIG.avoidWalls;
   else if (item.type === 'BOMB') watched = AI_CONFIG.avoidBombs && !item.meta.detonatedAt;
@@ -602,9 +619,11 @@ function collectItemAt(snake, cell, now) {
     killSnake(snake, now);
     spawnBurst(px, py, def.color, 60);
     console.info(`[item] BOMB mata a ${snake.name} en (${cell.x},${cell.y})`);
+    if (item.meta.donor) announceKill(item.meta, snake, now);
   } else if (item.type === 'WALL') {
     killSnake(snake, now);
     console.info(`[item] WALL mata a ${snake.name} en (${cell.x},${cell.y})`);
+    if (item.meta.donor) announceKill(item.meta, snake, now);
   }
 }
 
@@ -755,7 +774,8 @@ function normalizeItemType(type) {
 
 // Mete un item en el mapa. Sin coordenadas, en una celda vacía aleatoria.
 // Devuelve el item creado, o null si el tipo no existe o no hay sitio.
-function spawnItem(type, x, y, now = performance.now()) {
+// meta: datos del regalo que lo creó ({ donor, team, giftName, tier, label, hiddenFrom, homing })
+function spawnItem(type, x, y, now = performance.now(), meta = {}) {
   const key = normalizeItemType(type);
   if (!key) {
     console.warn(`[item] tipo "${type}" no existe. Disponibles: ${Object.keys(ITEM_TYPES).join(', ')}`);
@@ -786,7 +806,7 @@ function spawnItem(type, x, y, now = performance.now()) {
     y: cell.y,
     bornAt: now,
     expiresAt: def.lifetimeMs ? now + def.lifetimeMs : null,
-    meta: {},
+    meta: { ...meta },
   };
   state.items.push(item);
   console.info(`[item] ${key} en (${cell.x},${cell.y})`);
@@ -847,11 +867,13 @@ function endRound(now) {
   const scores = state.snakes.map((s) => `${s.name} ${s.score}`).join(' - ');
 
   const danced = state.dance !== null;
+  const mvp = getRoundMvp();
+  if (mvp) console.info(`[ronda ${state.round}] MVP: ${mvp.user} (${mvp.diamonds} diamantes)`);
   if (state.mode === 'PVP') {
     // Gana la última en pie (fijada al quedar sola, aunque luego chocara) o la que bailó; si no, empate
     const survivors = state.snakes.filter((s) => s.alive);
     const winner = state.pendingWinner || (survivors.length === 1 ? survivors[0] : null);
-    state.roundResult = { winner, danced };
+    state.roundResult = { winner, danced, mvp };
     const s = getThemeStats(state.roundTheme);
     if (winner) s[`${winner.id}Wins`]++;
     else s.draws++;
@@ -862,7 +884,7 @@ function endRound(now) {
         ` · total ${p1.name} ${s.p1Wins} - ${s.p2Wins} ${p2.name}, empates ${s.draws}`
     );
   } else {
-    state.roundResult = { winner: null, danced };
+    state.roundResult = { winner: null, danced, mvp };
     console.info(`[ronda ${state.round}] fin${danced ? ` (con danza ${state.dance.pattern})` : ''} · puntos ${scores} · ${seconds}s`);
   }
 }
@@ -873,6 +895,8 @@ function resetGame(now = performance.now()) {
   if (state.currentTheme !== state.roundTheme && state.teams.size > 0) {
     console.info(`[team] nueva temática: se reinician los teams (${state.teams.size} registrados)`);
     state.teams.clear();
+    // Los likes por equipo son de ese matchup; el total del live se mantiene
+    Object.assign(state.likes, { p1: 0, p2: 0, nextP1: 0, nextP2: 0 });
   }
   state.roundTheme = state.currentTheme;
   state.round++;
@@ -882,6 +906,7 @@ function resetGame(now = performance.now()) {
   state.pendingWinner = null;
   state.danceTriggered = false;
   state.dance = null;
+  state.roundDonations = new Map();
   state.foods = [];
   state.items = [];
   state.activeEffects = [];
@@ -1224,11 +1249,19 @@ function msUntilThemeRotation(now = performance.now()) {
 //   !theme <id>     cambia la temática de la próxima ronda (ids con guiones: [\w-]+)
 //   !team <equipo>  se une a un equipo del matchup actual. Admite acentos y ç (\S+): "!team barça".
 // Devuelve true si el mensaje era un comando y se aplicó.
-function onChatCommand(username, message) {
+// meta: { isModerator, isOwner } del evento de chat (TikTok los manda en userIdentity).
+// "!theme" solo lo pueden usar el dueño y los moderadores (SETTINGS.chatThemeCommand).
+function onChatCommand(username, message, meta = {}) {
   const text = String(message || '').trim();
   const themeMatch = /^!theme\s+([\w-]+)/i.exec(text);
   if (themeMatch) {
     const themeId = themeMatch[1].toLowerCase();
+    const policy = SETTINGS.chatThemeCommand;
+    const allowed = policy === 'all' || (policy === 'mods' && (meta.isModerator || meta.isOwner));
+    if (!allowed) {
+      console.info(`[chat] !theme de ${username} ignorado (${policy === 'off' ? 'desactivado' : 'solo dueño y moderadores'})`);
+      return false;
+    }
     console.info(`[chat] ${username} pide temática "${themeId}"`);
     return setTheme(themeId);
   }
@@ -1265,11 +1298,27 @@ function registerTeam(username, teamName) {
     return null;
   }
   const previous = state.teams.get(username);
-  state.teams.set(username, slot);
   state.knownUsers.add(username);
+  if (previous === slot) return slot; // ya estaba en ese equipo: sin log ni sonido
+  state.teams.set(username, slot);
   const change = previous && previous !== slot ? ` (antes ${theme[previous].name})` : '';
   console.info(`[team] ${username} -> ${theme[slot].name} (${slot})${change}`);
   return slot;
+}
+
+// Unirse a un equipo escribiendo solo el nombre o un alias ("colombia", "col", "dale arg").
+// Para no dispararse con frases largas: el mensaje debe EMPEZAR por el alias, o tener 3 palabras o menos
+// y mencionar un solo equipo. "colombia vs argentina" (dos equipos, no empieza... sí empieza) cuenta como colombia.
+function tryJoinTeamFromChat(username, message) {
+  if (state.mode !== 'PVP' || !SETTINGS.joinTeamByName) return false;
+  const words = String(message || '').trim().split(/\s+/).map(normalizeTeamName).filter(Boolean);
+  if (words.length === 0) return false;
+  const first = resolveTeamSlot(words[0]);
+  if (first) return registerTeam(username, words[0]) !== null;
+  if (words.length > 3) return false;
+  const slots = new Set(words.map((w) => resolveTeamSlot(w)).filter(Boolean));
+  if (slots.size !== 1) return false; // no menciona equipo, o menciona los dos
+  return registerTeam(username, [...slots][0]) !== null;
 }
 
 // Cuántos espectadores hay en cada equipo; neutral = vistos en algún evento pero sin equipo
@@ -1343,7 +1392,9 @@ function handleBridgeMessage(msg) {
 }
 
 // Órdenes del panel de control (se amplían en el Bloque 5)
-const CONTROL_COMMANDS = {};
+const CONTROL_COMMANDS = {
+  reloadMapping: () => loadGiftMapping(true),
+};
 
 function handleControlCommand(command, args) {
   const handler = CONTROL_COMMANDS[command];
@@ -1370,6 +1421,9 @@ function reportGameStatus() {
     theme: state.roundTheme,
     errors: perf.errorsTotal,
     items: state.items.length,
+    queue: state.effectQueue.length,
+    metrics: state.metrics,
+    likes: state.likes,
   });
 }
 
@@ -1384,12 +1438,753 @@ function handleTikTokEvent(event) {
     const user = event.user || 'anónimo';
     state.knownUsers.add(user);
     console.info(`[tiktok] ${event.type} de ${user} (modo ${state.mode})`, event);
-    if (event.type === 'chat') onChatCommand(user, event.message);
-    // Fase 5: aquí va el mapeo según state.mode (SOLO: caos para todos; PVP: por equipos con state.teams)
+    switch (event.type) {
+      case 'gift':
+        processGiftEvent({ ...event, user });
+        break;
+      case 'like':
+        processLikeEvent({ ...event, user });
+        break;
+      case 'follow':
+        processFollowEvent({ ...event, user });
+        break;
+      case 'share':
+        processShareEvent({ ...event, user });
+        break;
+      case 'chat':
+        if (!onChatCommand(user, event.message, event)) tryJoinTeamFromChat(user, event.message);
+        break;
+      default:
+        break;
+    }
   } catch (err) {
     // Un evento raro nunca debe tumbar el juego
     console.error('[tiktok] error procesando evento', event, err);
   }
+}
+
+// ---------- Regalos -> efectos (config/gift-mapping.json) ----------
+// Respaldo por si no se puede leer el JSON (juego abierto como archivo). La fuente de verdad es el JSON.
+const DEFAULT_GIFT_MAPPING = {
+  "tiers": [
+    {
+      "id": "T1",
+      "minDiamonds": 1,
+      "label": "pequeño"
+    },
+    {
+      "id": "T2",
+      "minDiamonds": 5,
+      "label": "mediano"
+    },
+    {
+      "id": "T3",
+      "minDiamonds": 30,
+      "label": "grande"
+    },
+    {
+      "id": "T4",
+      "minDiamonds": 100,
+      "label": "enorme"
+    },
+    {
+      "id": "T5",
+      "minDiamonds": 500,
+      "label": "épico"
+    }
+  ],
+  "overrides": {
+    "byGiftId": {},
+    "byName": {}
+  },
+  "pvp": {
+    "T1": {
+      "text": "comida extra para tu equipo",
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "ally"
+        }
+      ]
+    },
+    "T2": {
+      "text": "velocidad para tu equipo",
+      "actions": [
+        {
+          "do": "speed",
+          "target": "ally"
+        }
+      ]
+    },
+    "T3": {
+      "text": "muro delante del rival",
+      "actions": [
+        {
+          "do": "wallLine",
+          "target": "rival",
+          "length": 3,
+          "minDistance": 3,
+          "maxDistance": 4
+        }
+      ]
+    },
+    "T4": {
+      "text": "bomba teledirigida al rival",
+      "actions": [
+        {
+          "do": "homingBomb",
+          "target": "rival",
+          "pattern": "ahead",
+          "distance": 2
+        }
+      ]
+    },
+    "T5": {
+      "text": "ATAQUE ÉPICO: 3 bombas al rival + 3 comidas",
+      "actions": [
+        {
+          "do": "homingBomb",
+          "target": "rival",
+          "pattern": "trap",
+          "distance": 2
+        },
+        {
+          "do": "megaFood",
+          "target": "ally",
+          "count": 3
+        },
+        {
+          "do": "epic"
+        }
+      ]
+    }
+  },
+  "pvpNoTeam": {
+    "T1": {
+      "text": "comida en el centro",
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "center"
+        }
+      ]
+    },
+    "T2": {
+      "text": "comida en el centro",
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "center"
+        }
+      ]
+    },
+    "T3": {
+      "useSolo": true
+    },
+    "T4": {
+      "useSolo": true
+    },
+    "T5": {
+      "useSolo": true
+    }
+  },
+  "solo": {
+    "T1": {
+      "text": "comida o velocidad",
+      "actions": [
+        {
+          "do": "random",
+          "options": [
+            {
+              "do": "megaFood",
+              "target": "random"
+            },
+            {
+              "do": "speed",
+              "target": "ally"
+            }
+          ]
+        }
+      ]
+    },
+    "T2": {
+      "text": "un muro",
+      "actions": [
+        {
+          "do": "wall",
+          "target": "random"
+        }
+      ]
+    },
+    "T3": {
+      "text": "3 bombas",
+      "actions": [
+        {
+          "do": "bomb",
+          "target": "random",
+          "count": 3
+        }
+      ]
+    },
+    "T4": {
+      "text": "CAOS: bombas, muros y comida",
+      "actions": [
+        {
+          "do": "bomb",
+          "target": "random",
+          "count": 5
+        },
+        {
+          "do": "wall",
+          "target": "random",
+          "count": 3
+        },
+        {
+          "do": "megaFood",
+          "target": "random",
+          "count": 2
+        }
+      ]
+    },
+    "T5": {
+      "text": "CAOS ÉPICO",
+      "actions": [
+        {
+          "do": "bomb",
+          "target": "random",
+          "count": 5
+        },
+        {
+          "do": "wall",
+          "target": "random",
+          "count": 3
+        },
+        {
+          "do": "megaFood",
+          "target": "random",
+          "count": 2
+        },
+        {
+          "do": "epic"
+        }
+      ]
+    }
+  },
+  "likes": {
+    "pvp": {
+      "teamGoal": 300,
+      "teamText": "comida para tu equipo",
+      "teamActions": [
+        {
+          "do": "megaFood",
+          "target": "ally"
+        }
+      ],
+      "globalGoal": 1000,
+      "globalText": "lluvia de comida",
+      "globalActions": [
+        {
+          "do": "megaFood",
+          "target": "center",
+          "count": 5
+        }
+      ]
+    },
+    "solo": {
+      "goal": 100,
+      "text": "comida extra",
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "random"
+        }
+      ]
+    }
+  },
+  "follow": {
+    "text": "¡Gracias por seguir, @{user}!",
+    "actions": [
+      {
+        "do": "megaFood",
+        "target": "center"
+      }
+    ]
+  },
+  "share": {
+    "text": "velocidad para tu equipo",
+    "actions": [
+      {
+        "do": "speed",
+        "target": "userTeam"
+      }
+    ]
+  },
+  "queue": {
+    "maxEffectsPerSecond": 10,
+    "maxLength": 1500
+  },
+  "caps": {
+    "BOMB": 8,
+    "WALL": 6,
+    "MEGA_FOOD": 6,
+    "SPEED": 4
+  },
+  "overflowPoints": {
+    "T1": 1,
+    "T2": 2,
+    "T3": 5,
+    "T4": 10,
+    "T5": 25,
+    "like": 1,
+    "follow": 1,
+    "share": 1
+  }
+};
+let GIFT_MAPPING = normalizeMapping(DEFAULT_GIFT_MAPPING);
+let mappingVersion = 0; // sube en cada recarga (las instrucciones en pantalla se regeneran)
+
+function normalizeMapping(m) {
+  const copy = JSON.parse(JSON.stringify(m));
+  copy.tiers.sort((a, b) => a.minDiamonds - b.minDiamonds);
+  return copy;
+}
+
+async function loadGiftMapping(fromPanel = false) {
+  const loaded = await loadConfigJson('gift-mapping.json');
+  if (loaded && Array.isArray(loaded.tiers) && loaded.pvp && loaded.solo) {
+    GIFT_MAPPING = normalizeMapping(loaded);
+    mappingVersion++;
+    console.info(`[mapeo] config/gift-mapping.json cargado${fromPanel ? ' (recargado desde el panel)' : ''}`);
+    return true;
+  }
+  if (loaded) console.warn('[mapeo] gift-mapping.json no tiene el formato esperado; se mantiene el anterior');
+  return false;
+}
+
+const tierNumber = (tierId) => Number(String(tierId).replace(/\D/g, '')) || 1;
+
+// Tier de UNA unidad del regalo: override por id o nombre; si no, por diamantes
+function resolveGiftTier(event) {
+  const overrides = GIFT_MAPPING.overrides || {};
+  const byId = overrides.byGiftId && overrides.byGiftId[String(event.giftId)];
+  if (byId) return byId;
+  const byName = overrides.byName || {};
+  const nameKey = Object.keys(byName).find((k) => k.toLowerCase() === String(event.giftName || '').toLowerCase());
+  if (nameKey) return byName[nameKey];
+  const diamonds = Math.max(1, Number(event.diamondCount) || 1);
+  let tier = GIFT_MAPPING.tiers[0].id;
+  for (const t of GIFT_MAPPING.tiers) if (diamonds >= t.minDiamonds) tier = t.id;
+  return tier;
+}
+
+// Regla que aplica: PVP con equipo, PVP sin equipo (T3+ usa la de SOLO) o SOLO
+function giftRule(tier, team) {
+  if (state.mode === 'PVP') {
+    if (team) return GIFT_MAPPING.pvp[tier];
+    const noTeam = GIFT_MAPPING.pvpNoTeam && GIFT_MAPPING.pvpNoTeam[tier];
+    if (noTeam && !noTeam.useSolo) return noTeam;
+  }
+  return GIFT_MAPPING.solo[tier];
+}
+
+const snakeBySlot = (slot) => state.snakes.find((s) => s.id === slot) || null;
+const teamOf = (user) => (state.mode === 'PVP' ? state.teams.get(user) || null : null);
+
+function processGiftEvent(event) {
+  const units = Math.max(1, Math.min(1000, Number(event.repeatCount) || 1));
+  const diamonds = Math.max(0, Number(event.diamondCount) || 0);
+  const tier = resolveGiftTier(event);
+  const team = teamOf(event.user);
+  const rule = giftRule(tier, team);
+  state.metrics.gifts++;
+  state.metrics.units += units;
+  state.roundDonations.set(event.user, (state.roundDonations.get(event.user) || 0) + diamonds * units);
+  pushAlert({ kind: 'gift', user: event.user, team, tier, units, giftName: event.giftName, event, text: rule && rule.text });
+  if (!rule || !Array.isArray(rule.actions)) {
+    console.warn(`[regalo] sin regla para ${tier} (${state.mode}${team ? ', con equipo' : ''})`);
+    return;
+  }
+  for (let i = 0; i < units; i++) {
+    enqueueEffect({ kind: 'gift', tier, priority: tierNumber(tier), user: event.user, team, giftName: event.giftName, actions: rule.actions });
+  }
+}
+
+// Likes: suman al equipo del usuario (PVP) o al total; cada meta se dispara una sola vez
+function processLikeEvent(event) {
+  const n = Math.max(0, Number(event.likeCount) || 0);
+  if (n === 0) return;
+  const L = state.likes;
+  L.total += n;
+  if (state.mode === 'PVP') {
+    const cfg = GIFT_MAPPING.likes.pvp;
+    const team = teamOf(event.user);
+    if (team) {
+      L[team] += n;
+      const key = team === 'p1' ? 'nextP1' : 'nextP2';
+      if (!L[key]) L[key] = cfg.teamGoal;
+      while (L[team] >= L[key]) {
+        console.info(`[likes] meta de ${snakeBySlot(team) ? snakeBySlot(team).name : team}: ${L[key]} likes`);
+        pushAlert({ kind: 'likeGoal', team, text: `¡${L[key]} likes! ${cfg.teamText}` });
+        enqueueEffect({ kind: 'like', tier: 'like', priority: 0.5, user: event.user, team, actions: cfg.teamActions });
+        L[key] += cfg.teamGoal;
+      }
+    }
+    if (!L.nextGlobal) L.nextGlobal = cfg.globalGoal;
+    while (L.total >= L.nextGlobal) {
+      console.info(`[likes] meta global: ${L.nextGlobal} likes`);
+      pushAlert({ kind: 'likeGoal', team: null, text: `¡${L.nextGlobal} likes! ${cfg.globalText}` });
+      enqueueEffect({ kind: 'like', tier: 'like', priority: 0.5, user: event.user, team: null, actions: cfg.globalActions });
+      L.nextGlobal += cfg.globalGoal;
+    }
+  } else {
+    const cfg = GIFT_MAPPING.likes.solo;
+    if (!L.nextSolo) L.nextSolo = cfg.goal;
+    while (L.total >= L.nextSolo) {
+      console.info(`[likes] meta: ${L.nextSolo} likes`);
+      pushAlert({ kind: 'likeGoal', team: null, text: `¡${L.nextSolo} likes! ${cfg.text}` });
+      enqueueEffect({ kind: 'like', tier: 'like', priority: 0.5, user: event.user, team: null, actions: cfg.actions });
+      L.nextSolo += cfg.goal;
+    }
+  }
+}
+
+function processFollowEvent(event) {
+  const cfg = GIFT_MAPPING.follow;
+  pushAlert({ kind: 'follow', user: event.user, team: teamOf(event.user), text: cfg.text.replace('{user}', displayHandle(event.user)) });
+  enqueueEffect({ kind: 'follow', tier: 'follow', priority: 0.5, user: event.user, team: teamOf(event.user), actions: cfg.actions });
+}
+
+function processShareEvent(event) {
+  const cfg = GIFT_MAPPING.share;
+  pushAlert({ kind: 'share', user: event.user, team: teamOf(event.user), text: cfg.text });
+  enqueueEffect({ kind: 'share', tier: 'share', priority: 0.5, user: event.user, team: teamOf(event.user), actions: cfg.actions });
+}
+
+// ---------- Cola de efectos ----------
+// Prioridad (T5 primero, FIFO dentro de cada nivel) y un máximo de efectos por segundo.
+// Solo se aplican con la ronda en juego (en la cuenta atrás o la danza esperan). Nada se pierde en silencio:
+// si la cola se llena, el trabajo más viejo de menor prioridad se convierte en puntos.
+function enqueueEffect(job) {
+  const q = state.effectQueue;
+  const maxLength = (GIFT_MAPPING.queue && GIFT_MAPPING.queue.maxLength) || 1500;
+  if (q.length >= maxLength) {
+    let victim = q.length - 1; // el final de la cola es la menor prioridad
+    const dropped = q.splice(victim, 1)[0];
+    awardOverflow(dropped, 'cola llena');
+  }
+  let i = q.length;
+  while (i > 0 && q[i - 1].priority < job.priority) i--;
+  q.splice(i, 0, { ...job, createdAt: performance.now() });
+}
+
+function processEffectQueue(now, dt) {
+  const rate = (GIFT_MAPPING.queue && GIFT_MAPPING.queue.maxEffectsPerSecond) || 10;
+  state.queueTokens = Math.min(rate, state.queueTokens + (dt * rate) / 1000);
+  if (state.phase !== 'playing') return;
+  while (state.queueTokens >= 1 && state.effectQueue.length > 0) {
+    state.queueTokens -= 1;
+    runEffectJob(state.effectQueue.shift(), now);
+  }
+}
+
+function runEffectJob(job, now) {
+  let failed = 0;
+  for (const action of job.actions || []) {
+    try {
+      failed += executeAction(action, job, now);
+    } catch (err) {
+      console.error('[regalo] error en la acción', action, err);
+      failed++;
+    }
+  }
+  state.metrics.effects++;
+  if (failed > 0) awardOverflow(job, 'tope de items o sin sitio');
+}
+
+// Efecto que no se pudo aplicar -> puntos para el equipo (nunca se pierde en silencio)
+function awardOverflow(job, reason) {
+  const points = (GIFT_MAPPING.overflowPoints || {})[job.tier] || 1;
+  const snake = recipientSnake(job);
+  state.metrics.overflow++;
+  if (!snake) {
+    console.info(`[regalo] ${job.user}: ${reason}; no hay culebra a la que dar los puntos`);
+    return;
+  }
+  snake.score += points;
+  const head = snake.body[0];
+  addFloater(`+${points}`, cellCenterX(head.x), cellCenterY(head.y) - CELL, snake.color);
+  console.info(`[regalo] ${job.user} (${job.tier}): ${reason} -> +${points} puntos para ${snake.name}`);
+}
+
+function recipientSnake(job) {
+  if (state.mode !== 'PVP') return state.snakes[0] || null;
+  if (job.team && snakeBySlot(job.team)) return snakeBySlot(job.team);
+  const alive = state.snakes.filter((s) => s.alive);
+  const pool = alive.length ? alive : state.snakes;
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+}
+
+// Culebra objetivo de una acción: ally (del equipo del donante), rival, userTeam (su equipo o una al azar), random
+function resolveTargetSnake(target, job) {
+  if (state.mode !== 'PVP') return state.snakes[0] || null;
+  const ally = job.team ? snakeBySlot(job.team) : null;
+  if (target === 'ally') return ally;
+  if (target === 'rival') return job.team ? state.snakes.find((s) => s.id !== job.team) || null : null;
+  if (target === 'userTeam' && ally) return ally;
+  const alive = state.snakes.filter((s) => s.alive);
+  return alive.length ? alive[Math.floor(Math.random() * alive.length)] : null;
+}
+
+// Ejecuta una acción. Devuelve cuántas unidades NO se pudieron aplicar (0 = todo bien).
+function executeAction(action, job, now) {
+  const count = Math.max(1, Number(action.count) || 1);
+  switch (action.do) {
+    case 'megaFood':
+      return spawnForAction('MEGA_FOOD', action, job, now, count);
+    case 'wall':
+      return spawnForAction('WALL', action, job, now, count);
+    case 'bomb':
+      return spawnForAction('BOMB', action, job, now, count);
+    case 'speed': {
+      const snake = resolveTargetSnake(action.target, job);
+      if (!snake || !snake.alive) return 1;
+      applySpeedEffect(snake, now);
+      spawnBurst(cellCenterX(snake.body[0].x), cellCenterY(snake.body[0].y), ITEM_TYPES.SPEED.color, 16);
+      return 0;
+    }
+    case 'wallLine':
+      return spawnWallLine(action, job, now);
+    case 'homingBomb':
+      return spawnHomingBombs(action, job, now);
+    case 'random': {
+      const options = action.options || [];
+      return options.length ? executeAction(options[Math.floor(Math.random() * options.length)], job, now) : 0;
+    }
+    case 'epic':
+      triggerEpic(job, now);
+      return 0;
+    case 'points': {
+      const snake = recipientSnake(job);
+      if (snake) snake.score += Number(action.amount) || 1;
+      return 0;
+    }
+    default:
+      console.warn(`[regalo] acción desconocida: ${action.do}`);
+      return 0;
+  }
+}
+
+function capReached(type) {
+  const cap = (GIFT_MAPPING.caps || {})[type];
+  return cap !== undefined && state.items.filter((it) => it.type === type && !it.meta.detonatedAt).length >= cap;
+}
+
+// Datos del donante que se guardan en cada item (crédito, @usuario encima en T3+)
+function donorMeta(job, extra = {}) {
+  const tierNum = job.kind === 'gift' ? tierNumber(job.tier) : 0;
+  const team = job.team ? snakeBySlot(job.team) : null;
+  return {
+    donor: job.user,
+    team: job.team,
+    giftName: job.giftName,
+    tier: job.tier,
+    label: tierNum >= 3 ? `@${displayHandle(job.user)}` : null,
+    labelColor: team ? team.color : '#ffffff',
+    ...extra,
+  };
+}
+
+// Distancia mínima a cualquier cabeza viva (para no poner nada encima o pegado a una cabeza)
+function minHeadDistance(x, y) {
+  let best = Infinity;
+  for (const s of state.snakes) {
+    if (!s.alive) continue;
+    best = Math.min(best, Math.abs(s.body[0].x - x) + Math.abs(s.body[0].y - y));
+  }
+  return best;
+}
+
+function isFreeCell(x, y, occupied, minHeadDist) {
+  return inBounds(x, y) && !occupied[cellIndex(x, y)] && minHeadDistance(x, y) >= minHeadDist;
+}
+
+// Celda libre cerca de (cx, cy) a distancia [minD, maxD]; si se pasa `dir`, prefiere las de delante
+function findCellNear(cx, cy, minD, maxD, dir, minHeadDist = 1) {
+  const occupied = buildOccupiedGrid();
+  const front = [];
+  const any = [];
+  for (let y = Math.max(0, cy - maxD); y <= Math.min(ROWS - 1, cy + maxD); y++) {
+    for (let x = Math.max(0, cx - maxD); x <= Math.min(COLS - 1, cx + maxD); x++) {
+      const d = Math.abs(x - cx) + Math.abs(y - cy);
+      if (d < minD || d > maxD || !isFreeCell(x, y, occupied, minHeadDist)) continue;
+      any.push({ x, y });
+      if (dir && (x - cx) * dir.x + (y - cy) * dir.y > 0) front.push({ x, y });
+    }
+  }
+  const pool = front.length ? front : any;
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+}
+
+// Celda libre al azar, a 2 o más de cualquier cabeza
+function findSafeEmptyCell(minHeadDist = 2) {
+  const occupied = buildOccupiedGrid();
+  for (let i = 0; i < 200; i++) {
+    const x = Math.floor(Math.random() * COLS);
+    const y = Math.floor(Math.random() * ROWS);
+    if (isFreeCell(x, y, occupied, minHeadDist)) return { x, y };
+  }
+  const cells = [];
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (isFreeCell(x, y, occupied, minHeadDist)) cells.push({ x, y });
+  return cells.length ? cells[Math.floor(Math.random() * cells.length)] : null;
+}
+
+// megaFood / wall / bomb según el objetivo: cerca de una culebra, en el centro o al azar
+function spawnForAction(type, action, job, now, count) {
+  let failed = 0;
+  const hazard = type === 'WALL' || type === 'BOMB';
+  for (let i = 0; i < count; i++) {
+    if (capReached(type)) {
+      failed++;
+      continue;
+    }
+    let cell = null;
+    if (action.target === 'center') {
+      cell = findCellNear(Math.floor(COLS / 2), Math.floor(ROWS / 2), 0, 4, null, 2);
+    } else if (action.target === 'ally' || action.target === 'userTeam') {
+      const snake = resolveTargetSnake(action.target, job);
+      if (snake && snake.alive) cell = findCellNear(snake.body[0].x, snake.body[0].y, 2, 5, snake.dir, 2);
+    } else {
+      cell = findSafeEmptyCell(hazard ? 2 : 1);
+    }
+    const item = cell && spawnItem(type, cell.x, cell.y, now, donorMeta(job, { label: i === 0 ? donorMeta(job).label : null }));
+    if (!item) failed++;
+  }
+  return failed;
+}
+
+// Muro de `length` celdas cruzado delante de la rival, a minDistance..maxDistance de su cabeza
+function spawnWallLine(action, job, now) {
+  const length = Math.max(1, Number(action.length) || 3);
+  const rival = resolveTargetSnake('rival', job);
+  if (!rival || !rival.alive) return length;
+  const head = rival.body[0];
+  const d = rival.dir;
+  const perp = { x: -d.y, y: d.x };
+  const occupied = buildOccupiedGrid();
+  const offsets = Array.from({ length }, (_, i) => i - Math.floor(length / 2));
+  const minD = Number(action.minDistance) || 3;
+  const maxD = Number(action.maxDistance) || minD;
+  let best = null;
+  for (let dist = minD; dist <= maxD && !best; dist++) {
+    for (const shift of [0, -1, 1]) {
+      const cells = offsets.map((o) => ({ x: head.x + d.x * dist + perp.x * (o + shift), y: head.y + d.y * dist + perp.y * (o + shift) }));
+      if (cells.every((c) => isFreeCell(c.x, c.y, occupied, 2))) {
+        best = cells;
+        break;
+      }
+    }
+  }
+  // Sin sitio para la línea completa: se ponen las celdas válidas a la distancia mínima
+  const cells = best || offsets.map((o) => ({ x: head.x + d.x * minD + perp.x * o, y: head.y + d.y * minD + perp.y * o })).filter((c) => isFreeCell(c.x, c.y, occupied, 2));
+  let placed = 0;
+  cells.forEach((c, i) => {
+    if (capReached('WALL')) return;
+    const meta = donorMeta(job);
+    if (i !== Math.floor(cells.length / 2)) meta.label = null; // el @usuario solo en la celda central
+    if (spawnItem('WALL', c.x, c.y, now, meta)) placed++;
+  });
+  return length - placed;
+}
+
+// Bombas teledirigidas: en el camino de la rival (nunca a distancia 0 o 1), invisibles para su IA.
+// pattern 'ahead': 1 bomba a `distance` celdas delante (si está ocupada, una más allá).
+// pattern 'trap': delante a 2 y a los dos costados del paso siguiente (se cierra la salida).
+function spawnHomingBombs(action, job, now) {
+  const rival = resolveTargetSnake('rival', job);
+  const wanted = action.pattern === 'trap' ? 3 : 1;
+  if (!rival || !rival.alive) return wanted;
+  const head = rival.body[0];
+  const d = rival.dir;
+  const perp = { x: -d.y, y: d.x };
+  const dist = Math.max(2, Number(action.distance) || 2);
+  const occupied = buildOccupiedGrid();
+  const groups =
+    action.pattern === 'trap'
+      ? [
+          [{ x: head.x + d.x * dist, y: head.y + d.y * dist }, { x: head.x + d.x * (dist + 1), y: head.y + d.y * (dist + 1) }],
+          [{ x: head.x + d.x * (dist - 1) + perp.x, y: head.y + d.y * (dist - 1) + perp.y }],
+          [{ x: head.x + d.x * (dist - 1) - perp.x, y: head.y + d.y * (dist - 1) - perp.y }],
+        ]
+      : [[{ x: head.x + d.x * dist, y: head.y + d.y * dist }, { x: head.x + d.x * (dist + 1), y: head.y + d.y * (dist + 1) }]];
+  let placed = 0;
+  groups.forEach((options, i) => {
+    if (capReached('BOMB')) return;
+    const cell = options.find((c) => isFreeCell(c.x, c.y, occupied, 2));
+    if (!cell) return;
+    const meta = donorMeta(job, { hiddenFrom: rival.id, homing: true });
+    if (i > 0) meta.label = null;
+    if (spawnItem('BOMB', cell.x, cell.y, now, meta)) {
+      placed++;
+      occupied[cellIndex(cell.x, cell.y)] = 1;
+    }
+  });
+  return wanted - placed;
+}
+
+// Ataque épico: cartel grande + temblor (la voz llega con el Bloque 3)
+function triggerEpic(job, now) {
+  const team = job.team ? snakeBySlot(job.team) : null;
+  showAnnouncement(`⚡ ATAQUE ÉPICO de @${displayHandle(job.user)} ⚡`, { color: team ? team.color : GOLD, durationMs: 2800, shakeMs: 700, shakePx: 16 });
+}
+
+// "💥 @juan eliminó a ARGENTINA" (o fuego amigo si la víctima es de su propio equipo)
+function announceKill(meta, victim, now) {
+  const team = meta.team ? snakeBySlot(meta.team) : null;
+  const friendly = meta.team && meta.team === victim.id;
+  console.info(`[regalo] ${meta.donor} ${friendly ? '(fuego amigo) alcanzó a' : 'eliminó a'} ${victim.name} con ${meta.giftName || 'un regalo'}`);
+  const text = friendly ? `💥 ¡Fuego amigo! @${displayHandle(meta.donor)} alcanzó a ${victim.name}` : `💥 @${displayHandle(meta.donor)} eliminó a ${victim.name}`;
+  showAnnouncement(text, { color: team ? team.color : '#ff5570', durationMs: 3000, shakeMs: 400, shakePx: 10 });
+}
+
+function getRoundMvp() {
+  let mvp = null;
+  for (const [user, diamonds] of state.roundDonations) {
+    if (diamonds > 0 && (!mvp || diamonds > mvp.diamonds)) mvp = { user, diamonds };
+  }
+  return mvp;
+}
+
+// ---------- Nombres en pantalla ----------
+// @usuario apto para mostrar: sin emojis ni símbolos raros, máximo 14 caracteres.
+// (El filtro de groserías y la lista de bloqueados se añaden en el Bloque 3.)
+function displayHandle(user, max = 14) {
+  const clean = String(user || '').replace(/^@/, '').replace(/[^\p{L}\p{N}._]/gu, '');
+  if (!clean) return 'alguien';
+  return clean.length > max ? clean.slice(0, max - 1) + '…' : clean;
+}
+
+// ---------- Avisos, carteles y textos flotantes ----------
+const MAX_ALERTS = 3;
+const ALERT_DURATION_MS = 6000;
+
+function pushAlert(alert) {
+  state.alerts.push({ ...alert, at: performance.now() });
+  while (state.alerts.length > MAX_ALERTS) state.alerts.shift();
+}
+
+// Cartel grande centrado sobre el mapa; si hay varios, salen uno detrás de otro
+function showAnnouncement(text, { color = GOLD, durationMs = 2500, shakeMs = 0, shakePx = 0 } = {}) {
+  state.announcements.push({ text, color, durationMs, shakeMs, shakePx, startedAt: null });
+  while (state.announcements.length > 6) state.announcements.splice(1, 1); // se descarta el más viejo en espera
+}
+
+function addFloater(text, x, y, color) {
+  state.floaters.push({ text, x, y, color, bornAt: performance.now() });
+  if (state.floaters.length > 40) state.floaters.shift();
+}
+
+function startShake(ms, px, now) {
+  state.shake = { until: now + ms, magnitude: px, duration: ms };
 }
 
 // ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
@@ -1560,6 +2355,18 @@ function drawBomb(item, cx, cy, now) {
     ctx.fill();
     ctx.shadowBlur = 0;
   }
+  // Bomba teledirigida (de un regalo): mira roja girando alrededor
+  if (item.meta.homing) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 51, 85, 0.85)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 6]);
+    ctx.lineDashOffset = -now / 30;
+    ctx.beginPath();
+    ctx.arc(cx, cy + 3, CELL * 0.52, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
   // Cuerpo: siempre con borde rojo y un brillo leve, para que se vea sobre el fondo oscuro aunque no parpadee
   ctx.shadowColor = def.color;
   ctx.shadowBlur = 14;
@@ -1677,6 +2484,14 @@ function drawItems(now) {
     }
     ITEM_RENDERERS[item.type](item, cx, cy, now);
     ctx.restore();
+    // @usuario del donante encima de los items de regalos grandes (T3+)
+    if (item.meta.label && !item.meta.detonatedAt) {
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      drawOutlinedText(item.meta.label, cx, cy - CELL * 0.8, `bold 22px ${HUD_FONT}`, item.meta.labelColor || '#ffffff', 5);
+      ctx.restore();
+    }
   }
 }
 
@@ -2164,6 +2979,11 @@ function drawCountdown(now) {
   const cy = CANVAS_HEIGHT / 2;
   drawRichRow(getRoundEndTitle(), cx, cy - 260, 1020, 14);
   drawOutlinedText('Siguiente ronda en', cx, cy - 130, `bold 54px ${HUD_FONT}`, '#ffffff', 8);
+  const mvp = state.roundResult && state.roundResult.mvp;
+  if (mvp) {
+    const line = `MVP DE LA RONDA: @${displayHandle(mvp.user)} · ${mvp.diamonds} 💎`;
+    drawOutlinedText(line, cx, cy + 300, fitFont(line, '900', 48, 1000), GOLD, 8);
+  }
   ctx.translate(cx, cy + 60);
   ctx.scale(scale, scale);
   drawOutlinedText(String(number), 0, 0, `900 260px ${HUD_FONT}`, '#ffffff', 18);
@@ -2203,6 +3023,49 @@ function drawThemeBanner(now) {
   ctx.restore();
 }
 
+function drawFloaters(now) {
+  state.floaters = state.floaters.filter((f) => now - f.bornAt < 1200);
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const f of state.floaters) {
+    const p = (now - f.bornAt) / 1200;
+    ctx.globalAlpha = 1 - p;
+    drawOutlinedText(f.text, f.x, f.y - p * 60, `900 40px ${HUD_FONT}`, f.color, 6);
+  }
+  ctx.restore();
+}
+
+// Cartel actual (uno a la vez): franja oscura con texto grande, entra con un pequeño rebote
+function drawAnnouncements(now) {
+  const a = state.announcements[0];
+  if (!a) return;
+  if (a.startedAt === null) {
+    a.startedAt = now;
+    if (a.shakeMs) startShake(a.shakeMs, a.shakePx, now);
+  }
+  const elapsed = now - a.startedAt;
+  if (elapsed > a.durationMs) {
+    state.announcements.shift();
+    return;
+  }
+  const p = Math.min(1, elapsed / 250);
+  const alpha = Math.min(1, elapsed / 150, (a.durationMs - elapsed) / 300);
+  // Durante la pantalla de fin de ronda va debajo del MVP, para no pisar "¡GANA X!"
+  const y = state.phase === 'dead' ? CANVAS_HEIGHT / 2 + 430 : GRID_Y + 330;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(0, y - 80, CANVAS_WIDTH, 160);
+  ctx.translate(CANVAS_WIDTH / 2, y);
+  const scale = p < 1 ? 0.6 + 0.4 * p + 0.08 * Math.sin(p * Math.PI) : 1;
+  ctx.scale(scale, scale);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  drawOutlinedText(a.text, 0, 0, fitFont(a.text, '900', 70, 1000), a.color, 12);
+  ctx.restore();
+}
+
 // Contador de FPS/TPS para verificar el loop (tecla D)
 const perf = { frames: 0, ticks: 0, fps: 0, tps: 0, errorsTotal: 0, lastSample: performance.now() };
 
@@ -2219,6 +3082,12 @@ function render(now) {
   // Fondo de la temática de la ronda en curso (también es el fondo del HUD)
   ctx.fillStyle = THEMES[state.roundTheme].background || '#000000';
   ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  // Temblor de pantalla (ataques épicos, eliminaciones)
+  ctx.save();
+  if (now < state.shake.until) {
+    const k = (state.shake.until - now) / state.shake.duration;
+    ctx.translate((Math.random() * 2 - 1) * state.shake.magnitude * k, (Math.random() * 2 - 1) * state.shake.magnitude * k);
+  }
   ctx.drawImage(gridLayer, 0, 0);
   drawFoods(now);
   drawItems(now);
@@ -2230,8 +3099,11 @@ function render(now) {
   }
   drawParticles();
   drawHud();
+  drawFloaters(now);
   if (state.phase === 'dancing') drawVictoryBanner(now);
+  ctx.restore();
   if (state.phase === 'dead') drawCountdown(now);
+  drawAnnouncements(now);
   drawThemeBanner(now);
   if (state.debug) drawDebug();
 }
@@ -2261,6 +3133,7 @@ function frame(now) {
       resetGame(now);
     }
 
+    processEffectQueue(now, dt);
     updateThemeRotation(now);
     updateParticles(dt);
     render(now);
@@ -2307,12 +3180,14 @@ window.addEventListener('keydown', (e) => {
 //   game.triggerVictoryDance(game.state.snakes[0], 'heart')
 window.game = {
   state, resetGame, tick, setTheme, onChatCommand, msUntilThemeRotation, spawnItem,
-  handleTikTokEvent, registerTeam, getTeamCounts, triggerVictoryDance, checkVictoryInminent,
+  handleTikTokEvent, registerTeam, getTeamCounts, triggerVictoryDance, checkVictoryInminent, loadGiftMapping,
+  get GIFT_MAPPING() { return GIFT_MAPPING; },
   THEMES, FLAG_RENDERERS, ITEM_TYPES, AI_CONFIG, DANCE_PATTERNS,
 };
 
 resetGame();
 requestAnimationFrame(frame);
 loadSettings();
+loadGiftMapping();
 connectToBridge();
 setInterval(reportGameStatus, GAME_STATUS_INTERVAL_MS);

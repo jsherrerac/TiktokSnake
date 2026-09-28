@@ -1,3 +1,5 @@
 {
-  "showConnectionDot": true
+  "showConnectionDot": true,
+  "chatThemeCommand": "mods",
+  "joinTeamByName": true
 }
