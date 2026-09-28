@@ -11,6 +11,7 @@
    - Fase 6: victory dance (la ganadora dibuja una figura con el cuerpo antes de cerrar la ronda).
    - Fase 5: regalos/likes/follows/shares -> efectos (config/gift-mapping.json), cola con prioridad y crédito al donante.
    - Audio: efectos procedurales o CC0 (Kenney), música opcional, voz con plantillas fijas y filtro de nombres.
+   - Engagement: feed de avisos, panel rotativo (instrucciones, likes, diamantes, top), intro de ronda, modo inactivo.
    ========================================================= */
 
 // ---------- Modo de juego ----------
@@ -146,6 +147,7 @@ async function loadSettings() {
   const loaded = await loadConfigJson('settings.json');
   if (!loaded) return;
   Object.assign(SETTINGS, loaded);
+  if (loaded.engagement && typeof loaded.engagement === 'object') Object.assign(ENGAGEMENT, loaded.engagement);
   // "audio" de settings.json es la base; lo guardado desde el panel en este navegador manda
   if (loaded.audio && typeof loaded.audio === 'object') {
     Object.assign(AUDIO_DEFAULTS, loaded.audio);
@@ -172,7 +174,7 @@ canvas.height = CANVAS_HEIGHT;
 // ---------- Estado global del juego ----------
 const state = {
   mode: MODE,         // modo de la ronda en curso (se fija en resetGame)
-  phase: 'playing',   // 'playing' | 'dancing' | 'dead'
+  phase: 'intro',     // 'intro' (3-2-1) | 'playing' | 'dancing' | 'dead'
   snakes: [],
   roundResult: null,  // PvP: { winner: snake } o { winner: null } si fue empate
   stats: loadStats(), // PvP: { [themeId]: { p1Wins, p2Wins, draws } }, persistente
@@ -193,6 +195,9 @@ const state = {
   floaters: [],                 // textos "+N" que suben y se desvanecen
   shake: { until: 0, magnitude: 0 },
   audioLocked: false,           // el navegador aún no deja sonar audio (hace falta un clic)
+  showSafeZones: false,         // overlay de lo que tapa la UI de TikTok (tecla Z)
+  introStartedAt: 0,
+  roundTeamDiamonds: { p1: 0, p2: 0 }, // diamantes de cada equipo en la ronda (tira y afloja)
   lastCountdownNumber: null,
   metrics: { gifts: 0, units: 0, effects: 0, overflow: 0 },
   foods: [],
@@ -872,6 +877,7 @@ function killSnake(snake, now = state.now, silent = false) {
   snake.deathTimestamp = now;
   stopHum(snake.id);
   if (!silent) playSound('death');
+  maybeStartSlowMotion(now);
   // Congelamos la serpiente en su última posición válida (no dentro de la pared)
   snake.body = snake.prevBody;
   snake.moved = false;
@@ -939,8 +945,11 @@ function resetGame(now = performance.now()) {
   state.round++;
   stopAllHums();
   stopDanceLoop();
-  if (state.round > 1) playSound('go');
-  state.phase = 'playing';
+  // Intro "RONDA N · A vs B · 3-2-1 ¡YA!": las culebras esperan quietas (ver updateIntro)
+  state.phase = 'intro';
+  state.introStartedAt = now;
+  state.lastCountdownNumber = null;
+  state.roundTeamDiamonds = { p1: 0, p2: 0 };
   state.roundResult = null;
   state.roundStartedAt = now;
   state.pendingWinner = null;
@@ -1450,6 +1459,8 @@ const CONTROL_COMMANDS = {
   blockUser: (user) => setBlockedUser(user, true),
   unblockUser: (user) => setBlockedUser(user, false),
   reloadNameFilter: () => loadNameFilter(),
+  resetRanking: () => resetSessionDonors(),
+  toggleSafeZones: () => (state.showSafeZones = !state.showSafeZones),
 };
 
 function handleControlCommand(command, args) {
@@ -1502,6 +1513,7 @@ function handleTikTokEvent(event) {
   try {
     const user = event.user || 'anónimo';
     state.knownUsers.add(user);
+    engagement.lastEventAt = performance.now();
     console.info(`[tiktok] ${event.type} de ${user} (modo ${state.mode})`, event);
     switch (event.type) {
       case 'gift':
@@ -1605,7 +1617,7 @@ const DEFAULT_GIFT_MAPPING = {
       ]
     },
     "T5": {
-      "text": "ATAQUE ÉPICO: 3 bombas al rival + 3 comidas",
+      "text": "ATAQUE ÉPICO al rival",
       "actions": [
         {
           "do": "homingBomb",
@@ -1864,8 +1876,29 @@ function processGiftEvent(event) {
   state.metrics.gifts++;
   state.metrics.units += units;
   state.roundDonations.set(event.user, (state.roundDonations.get(event.user) || 0) + diamonds * units);
-  pushAlert({ kind: 'gift', user: event.user, team, tier, units, giftName: event.giftName, event, text: rule && rule.text });
+  mergeOrPushAlert({
+    kind: 'gift',
+    user: event.user,
+    team,
+    tier,
+    units,
+    giftName: event.giftName,
+    summary: effectSummary(rule && rule.actions, team),
+    avatarUrl: event.profilePictureUrl,
+  });
+  addSessionDonation(event.user, diamonds * units);
+  if (team) state.roundTeamDiamonds[team] += diamonds * units;
   const tierNum = tierNumber(tier);
+  // Regalos grandes: cartel de 2-3 s con temblor al recibirlos (el T5 en juego ya tiene el de ATAQUE ÉPICO)
+  if (tierNum === 4 || (tierNum >= 5 && state.phase !== 'playing')) {
+    const teamSnake = team ? snakeBySlot(team) : null;
+    showAnnouncement(`🎁 @${displayHandle(event.user)} → ${cleanText(event.giftName, 20) || 'regalo'}`, {
+      color: teamSnake ? teamSnake.color : GOLD,
+      durationMs: 2500,
+      shakeMs: 300,
+      shakePx: 6,
+    });
+  }
   playSound(tierNum <= 1 ? 'giftSmall' : tierNum === 2 ? 'giftMedium' : 'giftBig');
   // Voz: agradece desde el tier mínimo; el T5 lo anuncia el ataque épico
   if (tierNum >= audio.settings.voiceMinTier && tierNum < 5) {
@@ -1924,14 +1957,14 @@ function processLikeEvent(event) {
 
 function processFollowEvent(event) {
   const cfg = GIFT_MAPPING.follow;
-  pushAlert({ kind: 'follow', user: event.user, team: teamOf(event.user), text: cfg.text.replace('{user}', displayHandle(event.user)) });
+  pushAlert({ kind: 'follow', user: event.user, team: teamOf(event.user), text: cfg.text.replace('{user}', displayHandle(event.user)), avatarUrl: event.profilePictureUrl });
   playSound('follow');
   enqueueEffect({ kind: 'follow', tier: 'follow', priority: 0.5, user: event.user, team: teamOf(event.user), actions: cfg.actions });
 }
 
 function processShareEvent(event) {
   const cfg = GIFT_MAPPING.share;
-  pushAlert({ kind: 'share', user: event.user, team: teamOf(event.user), text: cfg.text });
+  pushAlert({ kind: 'share', user: event.user, team: teamOf(event.user), text: cfg.text, avatarUrl: event.profilePictureUrl });
   enqueueEffect({ kind: 'share', tier: 'share', priority: 0.5, user: event.user, team: teamOf(event.user), actions: cfg.actions });
 }
 
@@ -2937,6 +2970,503 @@ function drawAudioUnlock() {
   ctx.restore();
 }
 
+// ---------- Capa de engagement en pantalla ----------
+// Zonas que tapa la UI de TikTok LIVE en el celular (aprox., ver docs/RESEARCH.md; confirmar con una captura real)
+const TIKTOK_UI_ZONES = [
+  { name: 'barra superior: host, espectadores, top donadores', x: 0, y: 0, w: 1080, h: 200 },
+  { name: 'banners de regalos', x: 0, y: 820, w: 720, h: 280 },
+  { name: 'chat', x: 0, y: 1150, w: 760, h: 570 },
+  { name: 'barra inferior: comentar, regalo, compartir', x: 0, y: 1720, w: 1080, h: 200 },
+  { name: 'likes y botones', x: 900, y: 1300, w: 180, h: 420 },
+];
+// Nuestros paneles, en la parte alta del mapa (lo más libre de UI de TikTok)
+const ALERT_FEED = { x: 688, y: GRID_Y + 12, w: 380, rowH: 62, gap: 8 };
+const INFO_PANEL = { x: 12, y: GRID_Y + 12, w: 380, h: 300 };
+
+const ENGAGEMENT_DEFAULTS = {
+  alertsFeed: true,
+  infoPanel: true,
+  infoRotateSeconds: 9,
+  introMs: 2400,          // intro de ronda: 3 - 2 - 1 - ¡YA!
+  idleSeconds: 45,        // sin eventos de TikTok durante este tiempo -> llamado a la acción + evento pequeño
+  slowMotion: true,       // cámara lenta en la muerte que decide la ronda
+  slowMotionMs: 400,
+  slowMotionFactor: 0.3,
+  // Llamados a la acción del modo inactivo. {p1}/{p2} = nombres de los equipos. Los que piden regalos
+  // (gift: true) salen como mucho 1 de cada 3 veces: TikTok penaliza pedir regalos de forma mecánica y repetida.
+  ctas: [
+    { text: '¡Escribe {p1} o {p2} en el chat para unirte a tu equipo!', modes: ['PVP'] },
+    { text: '¡Dale like para llenar la meta de tu equipo!', modes: ['PVP'] },
+    { text: '¡Manda una 🌹 para ayudar a tu país!', modes: ['PVP'], gift: true },
+    { text: '¡Dale like para darle comida a la culebra!', modes: ['SOLO'] },
+    { text: '¡Tus regalos cambian el juego!', modes: ['SOLO'], gift: true },
+  ],
+};
+const ENGAGEMENT = JSON.parse(JSON.stringify(ENGAGEMENT_DEFAULTS));
+const SESSION_DONORS_KEY = 'snakeTikTok.sessionDonors';
+
+const engagement = {
+  avatars: new Map(),       // url -> { img, ok }
+  giftImages: new Map(),
+  catalog: null,
+  lastEventAt: performance.now(),
+  lastIdleAt: 0,
+  ctaCount: 0,
+  sessionDonors: new Map(), // usuario -> diamantes en la sesión (top 3)
+  saveTimer: null,
+  slowMoUntil: 0,
+  slowMoUsedRound: 0,
+};
+
+// ---------- Top donadores de la sesión (localStorage, se resetea desde el panel) ----------
+function loadSessionDonors() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_DONORS_KEY));
+    if (saved && typeof saved === 'object') engagement.sessionDonors = new Map(Object.entries(saved));
+  } catch (e) {
+    /* sesión nueva */
+  }
+}
+
+function addSessionDonation(user, diamonds) {
+  if (!diamonds) return;
+  engagement.sessionDonors.set(user, (engagement.sessionDonors.get(user) || 0) + diamonds);
+  if (engagement.saveTimer) return;
+  engagement.saveTimer = setTimeout(() => {
+    engagement.saveTimer = null;
+    try {
+      localStorage.setItem(SESSION_DONORS_KEY, JSON.stringify(Object.fromEntries(engagement.sessionDonors)));
+    } catch (e) {
+      /* sin persistencia */
+    }
+  }, 1000);
+}
+
+function resetSessionDonors() {
+  engagement.sessionDonors = new Map();
+  try {
+    localStorage.removeItem(SESSION_DONORS_KEY);
+  } catch (e) {
+    /* nada */
+  }
+  console.info('[ranking] top de donadores de la sesión reiniciado');
+}
+
+function topDonors(n = 3) {
+  return [...engagement.sessionDonors.entries()]
+    .filter(([user]) => !isBlockedUser(user))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n);
+}
+
+// ---------- Catálogo de regalos (imágenes para las instrucciones) ----------
+async function loadGiftCatalog() {
+  if (!location.protocol.startsWith('http')) return;
+  try {
+    const res = await fetch(`/data/gift-catalog.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (res.ok) engagement.catalog = await res.json();
+  } catch (e) {
+    /* todavía no hay catálogo (se crea con el primer live real) */
+  }
+}
+
+function loadImage(cache, url) {
+  if (!url) return null;
+  let entry = cache.get(url);
+  if (!entry) {
+    const img = new Image();
+    entry = { img, ok: false };
+    img.onload = () => (entry.ok = true);
+    img.onerror = () => (entry.ok = false);
+    img.src = url;
+    cache.set(url, entry);
+    if (cache.size > 200) cache.delete(cache.keys().next().value);
+  }
+  return entry.ok ? entry.img : null;
+}
+
+// Regalo representativo de un tier (el más visto del catálogo con imagen), para las instrucciones
+function giftForTier(tierIndex) {
+  const gifts = engagement.catalog && engagement.catalog.gifts ? Object.values(engagement.catalog.gifts) : [];
+  const tiers = GIFT_MAPPING.tiers;
+  const min = tiers[tierIndex].minDiamonds;
+  const max = tierIndex + 1 < tiers.length ? tiers[tierIndex + 1].minDiamonds - 1 : Infinity;
+  const candidates = gifts.filter((g) => g.localImage && g.diamonds >= min && g.diamonds <= max);
+  candidates.sort((a, b) => b.timesSeen - a.timesSeen || a.diamonds - b.diamonds);
+  return candidates[0] || null;
+}
+
+// ---------- Feed de avisos ----------
+// Resumen corto del efecto de una regla: "+comida COLOMBIA", "bomba → ARGENTINA"...
+function effectSummary(actions, team) {
+  if (!actions || !actions.length) return '';
+  const ally = team ? snakeBySlot(team) : null;
+  const rival = team ? state.snakes.find((s) => s.id !== team) : null;
+  const main = actions[0];
+  const allyName = ally ? ` ${ally.name}` : '';
+  const rivalName = rival ? ` → ${rival.name}` : '';
+  switch (main.do) {
+    case 'megaFood':
+      return main.target === 'center' ? '+comida al centro' : `+comida${allyName}`;
+    case 'speed':
+      return `+velocidad${allyName}`;
+    case 'wallLine':
+      return `muro${rivalName}`;
+    case 'homingBomb':
+      return actions.some((a) => a.do === 'epic') ? `¡ATAQUE ÉPICO!${rivalName}` : `bomba${rivalName}`;
+    case 'bomb':
+      return 'bombas al mapa';
+    case 'wall':
+      return 'muro al mapa';
+    case 'random':
+      return 'sorpresa';
+    default:
+      return '';
+  }
+}
+
+// Texto de la fila del feed: línea principal (quién) y detalle (qué hizo)
+function alertLines(a) {
+  const who = a.user ? `@${displayHandle(a.user)}` : '';
+  if (a.kind === 'gift') return [who, `${a.units}× ${cleanText(a.giftName, 18) || 'regalo'} → ${a.summary}`];
+  if (a.kind === 'likeGoal') return ['❤ META DE LIKES', a.text];
+  if (a.kind === 'follow') return [`👋 ${who}`, '¡gracias por seguir!'];
+  if (a.kind === 'share') return [`↗ ${who}`, `compartió: ${a.text}`];
+  return [a.text || '', ''];
+}
+
+const alertText = (a) => alertLines(a).filter(Boolean).join(' · ');
+
+// Una racha del mismo regalo del mismo usuario se agrupa en una sola fila (5× Rosa)
+function mergeOrPushAlert(alert) {
+  const last = state.alerts[state.alerts.length - 1];
+  const now = performance.now();
+  if (last && alert.kind === 'gift' && last.kind === 'gift' && last.user === alert.user && last.giftName === alert.giftName && now - last.at < 3000) {
+    last.units += alert.units;
+    last.at = now;
+    return;
+  }
+  pushAlert(alert);
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Avatar: foto de perfil si llega; si no, la inicial en un círculo del color del equipo
+function drawAvatar(url, name, color, cx, cy, r) {
+  const img = loadImage(engagement.avatars, url);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.closePath();
+  if (img) {
+    ctx.clip();
+    ctx.drawImage(img, cx - r, cy - r, r * 2, r * 2);
+  } else {
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `900 ${Math.round(r * 1.1)}px ${HUD_FONT}`;
+    ctx.fillText((displayHandle(name).charAt(0) || '?').toUpperCase(), cx, cy + 1);
+  }
+  ctx.restore();
+}
+
+function drawAlertFeed(now) {
+  if (!ENGAGEMENT.alertsFeed) return;
+  const visible = state.alerts.filter((a) => now - a.at < ALERT_DURATION_MS);
+  const F = ALERT_FEED;
+  visible
+    .slice()
+    .reverse()
+    .forEach((a, i) => {
+      const age = now - a.at;
+      const slide = Math.min(1, age / 250);
+      const alpha = Math.min(1, (ALERT_DURATION_MS - age) / 500);
+      const x = F.x + (1 - slide) * (F.w + 20);
+      const y = F.y + i * (F.rowH + F.gap);
+      const team = a.team ? snakeBySlot(a.team) : null;
+      const color = team ? team.color : a.kind === 'likeGoal' ? '#ff5c8a' : GOLD;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.62)';
+      roundRect(x, y, F.w, F.rowH, 12);
+      ctx.fill();
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y + 8, 5, F.rowH - 16);
+      const hasAvatar = a.kind !== 'likeGoal';
+      if (hasAvatar) drawAvatar(a.avatarUrl, a.user || '?', color, x + 38, y + F.rowH / 2, 22);
+      const tx = hasAvatar ? x + 70 : x + 18;
+      const maxW = F.x + F.w - tx - 12;
+      const [main, detail] = alertLines(a);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      drawOutlinedText(main, tx, y + 20, fitFont(main, '900', 26, maxW), color, 5);
+      if (detail) drawOutlinedText(detail, tx, y + 45, fitFont(detail, 'bold', 21, maxW), '#ffffff', 4);
+      ctx.restore();
+    });
+}
+
+// ---------- Panel de información rotativo ----------
+// Páginas en orden de prioridad: cómo jugar > regalos > meta de likes > diamantes de la ronda > top donadores.
+// Todo se genera desde gift-mapping.json, así las instrucciones nunca mienten.
+function infoPages() {
+  const pages = ['howto', 'gifts', 'likes'];
+  if (state.mode === 'PVP') pages.push('diamonds');
+  if (topDonors().length) pages.push('top');
+  return pages;
+}
+
+function drawInfoPanel(now) {
+  if (!ENGAGEMENT.infoPanel || state.phase === 'dancing' || state.phase === 'intro') return;
+  const pages = infoPages();
+  const page = pages[Math.floor(now / (ENGAGEMENT.infoRotateSeconds * 1000)) % pages.length];
+  const P = INFO_PANEL;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.62)';
+  roundRect(P.x, P.y, P.w, P.h, 16);
+  ctx.fill();
+  ctx.textBaseline = 'middle';
+  const pages_ = pages;
+  // El título deja sitio a los puntos de página de la derecha
+  const title = (t) => {
+    ctx.textAlign = 'left';
+    drawOutlinedText(t, P.x + 18, P.y + 32, fitFont(t, '900', 28, P.w - 50 - pages_.length * 16), GOLD, 5);
+  };
+  const line = (t, y, color = '#ffffff', size = 24, x = P.x + 18) => {
+    ctx.textAlign = 'left';
+    drawOutlinedText(t, x, y, fitFont(t, 'bold', size, P.x + P.w - x - 14), color, 4);
+  };
+  const [p1, p2] = state.snakes;
+  if (page === 'howto') {
+    title('¿CÓMO JUGAR?');
+    if (state.mode === 'PVP' && p1 && p2) {
+      line('Escribe en el chat:', P.y + 80);
+      line(p1.name, P.y + 122, p1.color, 34);
+      ctx.textAlign = 'left';
+      drawOutlinedText('o', P.x + 18 + Math.min(200, p1.name.length * 22 + 20), P.y + 122, `bold 24px ${HUD_FONT}`, '#bbbbbb', 4);
+      line(p2.name, P.y + 164, p2.color, 34);
+      line('para unirte a tu equipo.', P.y + 208);
+      line('Tus regalos y likes ayudan', P.y + 246, '#dddddd', 22);
+      line('a tu culebra.', P.y + 276, '#dddddd', 22);
+    } else {
+      line('Tus regalos y likes', P.y + 90);
+      line('cambian el juego:', P.y + 124);
+      line('comida, velocidad, muros', P.y + 170, '#dddddd', 22);
+      line('y bombas.', P.y + 202, '#dddddd', 22);
+    }
+  } else if (page === 'gifts') {
+    title('REGALOS');
+    const rules = state.mode === 'PVP' ? GIFT_MAPPING.pvp : GIFT_MAPPING.solo;
+    GIFT_MAPPING.tiers.slice(0, 5).forEach((tier, i) => {
+      const y = P.y + 78 + i * 46;
+      const gift = giftForTier(i);
+      const img = gift ? loadImage(engagement.giftImages, gift.localImage) : null;
+      if (img) ctx.drawImage(img, P.x + 16, y - 18, 36, 36);
+      else {
+        ctx.fillStyle = ['#8fd3ff', '#9dff9d', '#ffe066', '#ff9d5c', '#ff5c8a'][i] || '#ffffff';
+        ctx.beginPath();
+        ctx.arc(P.x + 34, y, 17, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#111';
+        ctx.textAlign = 'center';
+        ctx.font = `900 16px ${HUD_FONT}`;
+        ctx.fillText(tier.id, P.x + 34, y + 1);
+      }
+      const rule = rules[tier.id];
+      line(rule && rule.text ? rule.text : '—', y - 9, '#ffffff', 21, P.x + 62);
+      line(`desde ${tier.minDiamonds} 💎`, y + 13, '#ffe066', 16, P.x + 62);
+    });
+  } else if (page === 'likes') {
+    title('META DE LIKES ❤');
+    const L = state.likes;
+    const bar = (label, value, goal, y, color) => {
+      const pct = goal ? Math.min(1, (value % goal) / goal) : 0;
+      line(`${label}  ${value % goal}/${goal}`, y, color, 22);
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      roundRect(P.x + 18, y + 18, P.w - 36, 14, 7);
+      ctx.fill();
+      ctx.fillStyle = color;
+      roundRect(P.x + 18, y + 18, Math.max(14, (P.w - 36) * pct), 14, 7);
+      ctx.fill();
+    };
+    if (state.mode === 'PVP' && p1 && p2) {
+      const cfg = GIFT_MAPPING.likes.pvp;
+      bar(p1.name, L.p1, cfg.teamGoal, P.y + 84, p1.color);
+      bar(p2.name, L.p2, cfg.teamGoal, P.y + 150, p2.color);
+      bar('TODOS', L.total, cfg.globalGoal, P.y + 216, '#ff5c8a');
+      line(`→ ${cfg.teamText} / ${cfg.globalText}`, P.y + 272, '#cccccc', 18);
+    } else {
+      const cfg = GIFT_MAPPING.likes.solo;
+      bar('LIKES', L.total, cfg.goal, P.y + 110, '#ff5c8a');
+      line(`cada ${cfg.goal} likes: ${cfg.text}`, P.y + 190, '#cccccc', 20);
+    }
+  } else if (page === 'diamonds') {
+    title('DIAMANTES DE LA RONDA');
+    const d1 = state.roundTeamDiamonds.p1;
+    const d2 = state.roundTeamDiamonds.p2;
+    const total = d1 + d2;
+    const share = total ? d1 / total : 0.5;
+    const barY = P.y + 130;
+    const barW = P.w - 36;
+    ctx.fillStyle = p2 ? p2.color : '#888';
+    roundRect(P.x + 18, barY, barW, 34, 10);
+    ctx.fill();
+    ctx.fillStyle = p1 ? p1.color : '#888';
+    roundRect(P.x + 18, barY, Math.max(20, Math.min(barW - 20, barW * share)), 34, 10);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(P.x + 18 + barW * share - 2, barY - 8, 4, 50);
+    if (p1 && p2) {
+      line(`${p1.name}  ${d1}💎`, P.y + 90, p1.color, 24);
+      ctx.textAlign = 'right';
+      drawOutlinedText(`${d2}💎  ${p2.name}`, P.x + P.w - 18, P.y + 210, fitFont(`${d2}💎  ${p2.name}`, 'bold', 24, P.w - 36), p2.color, 4);
+    }
+    line('¡Cada regalo empuja a tu equipo!', P.y + 262, '#cccccc', 20);
+  } else if (page === 'top') {
+    title('TOP DONADORES 🏆');
+    topDonors().forEach(([user, diamonds], i) => {
+      const y = P.y + 90 + i * 66;
+      drawAvatar(null, user, ['#ffd700', '#c0c0c0', '#cd7f32'][i], P.x + 40, y, 22);
+      line(`@${displayHandle(user)}`, y - 10, '#ffffff', 24, P.x + 74);
+      line(`${diamonds} 💎`, y + 18, '#ffe066', 20, P.x + 74);
+    });
+  }
+  // Puntos de página
+  pages.forEach((p, i) => {
+    ctx.fillStyle = p === page ? GOLD : 'rgba(255,255,255,0.3)';
+    ctx.beginPath();
+    ctx.arc(P.x + P.w - 18 - (pages.length - 1 - i) * 16, P.y + 30, 5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.restore();
+}
+
+// ---------- Overlay de zonas seguras (tecla Z) ----------
+function drawSafeZones() {
+  if (!state.showSafeZones) return;
+  ctx.save();
+  ctx.lineWidth = 3;
+  ctx.setLineDash([12, 8]);
+  for (const z of TIKTOK_UI_ZONES) {
+    ctx.fillStyle = 'rgba(255, 40, 80, 0.28)';
+    ctx.fillRect(z.x, z.y, z.w, z.h);
+    ctx.strokeStyle = '#ff3355';
+    ctx.strokeRect(z.x + 1.5, z.y + 1.5, z.w - 3, z.h - 3);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    drawOutlinedText(`TikTok: ${z.name}`, z.x + 12, z.y + 10, fitFont(`TikTok: ${z.name}`, 'bold', 24, z.w - 24), '#ffffff', 5);
+  }
+  ctx.strokeStyle = '#2ee66b';
+  for (const [label, r] of [['avisos', { x: ALERT_FEED.x, y: ALERT_FEED.y, w: ALERT_FEED.w, h: 3 * (ALERT_FEED.rowH + ALERT_FEED.gap) }], ['info', INFO_PANEL]]) {
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    drawOutlinedText(label, r.x + 8, r.y + r.h - 30, `bold 22px ${HUD_FONT}`, '#2ee66b', 4);
+  }
+  ctx.restore();
+}
+
+// ---------- Ritmo: intro de ronda, modo inactivo, cámara lenta ----------
+function updateIntro(now) {
+  const elapsed = now - state.introStartedAt;
+  const step = Math.min(3, Math.floor(elapsed / (ENGAGEMENT.introMs / 4)));
+  if (step !== state.lastCountdownNumber) {
+    state.lastCountdownNumber = step;
+    playSound(step < 3 ? 'countBeep' : 'go');
+  }
+  if (elapsed >= ENGAGEMENT.introMs) {
+    state.phase = 'playing';
+    state.roundStartedAt = now;
+    for (const s of state.snakes) s.moveAccumulator = 0;
+  }
+}
+
+// "RONDA 7 · COLOMBIA vs ARGENTINA · 3 - 2 - 1 - ¡YA!"
+function drawRoundIntro(now) {
+  if (state.phase !== 'intro') return;
+  const elapsed = now - state.introStartedAt;
+  const stepMs = ENGAGEMENT.introMs / 4;
+  const step = Math.min(3, Math.floor(elapsed / stepMs));
+  const frac = (elapsed % stepMs) / stepMs;
+  const cx = CANVAS_WIDTH / 2;
+  const cy = CANVAS_HEIGHT / 2;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  drawOutlinedText(`RONDA ${state.round}`, cx, cy - 320, `900 96px ${HUD_FONT}`, '#ffffff', 12);
+  const [p1, p2] = state.snakes;
+  if (state.mode === 'PVP' && p1 && p2) {
+    drawRichRow(
+      [
+        { flagId: p1.flagId, size: 64 },
+        { text: ` ${p1.name} `, weight: '900', size: 56, color: p1.color },
+        { text: 'vs', weight: '900', size: 44, color: '#bbbbbb' },
+        { text: ` ${p2.name} `, weight: '900', size: 56, color: p2.color },
+        { flagId: p2.flagId, size: 64 },
+      ],
+      cx, cy - 210, 1020, 8
+    );
+  } else if (p1) {
+    drawRichRow([{ flagId: p1.flagId, size: 64 }, { text: ` ${p1.name}`, weight: '900', size: 56, color: p1.color }], cx, cy - 210, 1020, 8);
+  }
+  const scale = 1 + 0.4 * (1 - frac) * (1 - frac);
+  ctx.translate(cx, cy + 20);
+  ctx.scale(scale, scale);
+  if (step < 3) drawOutlinedText(String(3 - step), 0, 0, `900 260px ${HUD_FONT}`, '#ffffff', 18);
+  else drawOutlinedText('¡YA!', 0, 0, `900 220px ${HUD_FONT}`, GOLD, 18);
+  ctx.restore();
+}
+
+// Sin eventos de TikTok un rato: llamado a la acción + un evento pequeño para que la pantalla nunca esté quieta
+function updateIdle(now) {
+  if (state.phase !== 'playing') return;
+  const idleMs = ENGAGEMENT.idleSeconds * 1000;
+  if (now - engagement.lastEventAt < idleMs || now - engagement.lastIdleAt < idleMs) return;
+  engagement.lastIdleAt = now;
+  const pool = ENGAGEMENT.ctas.filter((c) => !c.modes || c.modes.includes(state.mode));
+  // Pedir regalos: como mucho 1 de cada 3 llamados
+  const allowGift = engagement.ctaCount % 3 === 2;
+  const options = pool.filter((c) => allowGift || !c.gift);
+  const cta = options[Math.floor(Math.random() * options.length)] || pool[0];
+  engagement.ctaCount++;
+  if (cta) {
+    const [p1, p2] = state.snakes;
+    const text = cta.text.replace('{p1}', p1 ? p1.name : '').replace('{p2}', p2 ? p2.name : '');
+    showAnnouncement(text, { color: '#ffffff', durationMs: 3500 });
+  }
+  // Evento pequeño: comida extra o velocidad para una culebra al azar
+  if (Math.random() < 0.5) {
+    const cell = findSafeEmptyCell(2);
+    if (cell) spawnItem('MEGA_FOOD', cell.x, cell.y, now);
+  } else {
+    const alive = state.snakes.filter((s) => s.alive);
+    if (alive.length) applySpeedEffect(alive[Math.floor(Math.random() * alive.length)], now);
+  }
+  console.info('[inactivo] sin eventos de TikTok: llamado a la acción y evento pequeño');
+}
+
+// La muerte que decide la ronda se ve a cámara lenta un momento
+function maybeStartSlowMotion(now) {
+  if (!ENGAGEMENT.slowMotion || engagement.slowMoUsedRound === state.round) return;
+  const alive = state.snakes.filter((s) => s.alive).length;
+  const decisive = state.mode === 'PVP' ? alive <= 1 : alive === 0;
+  if (!decisive) return;
+  engagement.slowMoUsedRound = state.round;
+  engagement.slowMoUntil = now + ENGAGEMENT.slowMotionMs;
+}
+
+const timeScale = (now) => (now < engagement.slowMoUntil ? ENGAGEMENT.slowMotionFactor : 1);
+
 // ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
 function spawnBurst(x, y, color, count) {
   for (let i = 0; i < count; i++) {
@@ -3713,13 +4243,7 @@ function getRoundEndTitle() {
 }
 
 function drawCountdown(now) {
-  const elapsed = now - state.deathAt;
-  const remaining = Math.max(0, RESTART_DELAY_MS - elapsed);
-  const number = Math.max(1, Math.ceil(remaining / 1000));
-  // Cada número "rebota": empieza grande y se asienta
-  const frac = (remaining % 1000) / 1000;
-  const scale = 1 + 0.35 * frac * frac;
-
+  const remaining = Math.max(0, RESTART_DELAY_MS - (now - state.deathAt));
   ctx.save();
   ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
   ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -3728,15 +4252,26 @@ function drawCountdown(now) {
   const cx = CANVAS_WIDTH / 2;
   const cy = CANVAS_HEIGHT / 2;
   drawRichRow(getRoundEndTitle(), cx, cy - 260, 1020, 14);
-  drawOutlinedText('Siguiente ronda en', cx, cy - 130, `bold 54px ${HUD_FONT}`, '#ffffff', 8);
+  // Marcador final de la ronda
+  const [p1, p2] = state.snakes;
+  if (state.mode === 'PVP' && p1 && p2) {
+    drawRichRow(
+      [
+        { text: `${p1.name} ${p1.score}`, weight: '900', size: 56, color: p1.color },
+        { text: '   -   ', weight: '900', size: 56, color: '#ffffff' },
+        { text: `${p2.score} ${p2.name}`, weight: '900', size: 56, color: p2.color },
+      ],
+      cx, cy - 130, 1000, 8
+    );
+  } else if (p1) {
+    drawOutlinedText(`PUNTOS: ${p1.score}`, cx, cy - 130, `900 64px ${HUD_FONT}`, '#ffffff', 8);
+  }
   const mvp = state.roundResult && state.roundResult.mvp;
   if (mvp) {
     const line = `MVP DE LA RONDA: @${displayHandle(mvp.user)} · ${mvp.diamonds} 💎`;
-    drawOutlinedText(line, cx, cy + 300, fitFont(line, '900', 48, 1000), GOLD, 8);
+    drawOutlinedText(line, cx, cy + 20, fitFont(line, '900', 52, 1000), GOLD, 8);
   }
-  ctx.translate(cx, cy + 60);
-  ctx.scale(scale, scale);
-  drawOutlinedText(String(number), 0, 0, `900 260px ${HUD_FONT}`, '#ffffff', 18);
+  drawOutlinedText(`siguiente ronda en ${Math.max(1, Math.ceil(remaining / 1000))}…`, cx, cy + 150, `bold 36px ${HUD_FONT}`, 'rgba(255,255,255,0.7)', 6);
   ctx.restore();
 }
 
@@ -3850,11 +4385,15 @@ function render(now) {
   drawParticles();
   drawHud();
   drawFloaters(now);
+  drawInfoPanel(now);
+  drawAlertFeed(now);
   if (state.phase === 'dancing') drawVictoryBanner(now);
   ctx.restore();
   if (state.phase === 'dead') drawCountdown(now);
+  drawRoundIntro(now);
   drawAnnouncements(now);
   drawThemeBanner(now);
+  drawSafeZones();
   if (state.debug) drawDebug();
   drawAudioUnlock();
 }
@@ -3874,25 +4413,24 @@ function frame(now) {
     if (dt > 250) dt = 250;
 
     state.now = now;
+    // Cámara lenta (muerte que decide la ronda): el juego avanza más despacio un momento
+    const simDt = dt * timeScale(now);
     if (isRoundActive()) {
       for (const snake of state.snakes) {
-        if (canMove(snake)) snake.moveAccumulator += dt;
+        if (canMove(snake)) snake.moveAccumulator += simDt;
       }
       advanceSnakes(now);
       updateRoundStatus(now);
+    } else if (state.phase === 'intro') {
+      updateIntro(now);
     } else if (now - state.deathAt >= RESTART_DELAY_MS) {
       resetGame(now);
-    } else {
-      const number = Math.max(1, Math.ceil((RESTART_DELAY_MS - (now - state.deathAt)) / 1000));
-      if (number !== state.lastCountdownNumber) {
-        state.lastCountdownNumber = number;
-        playSound('countBeep');
-      }
     }
 
     processEffectQueue(now, dt);
+    updateIdle(now);
     updateThemeRotation(now);
-    updateParticles(dt);
+    updateParticles(simDt);
     render(now);
 
     perf.frames++;
@@ -3927,6 +4465,7 @@ function frame(now) {
 // Tecla D: mostrar/ocultar FPS (solo para pruebas; el juego no necesita input)
 window.addEventListener('keydown', (e) => {
   if (e.key === 'd' || e.key === 'D') state.debug = !state.debug;
+  if (e.key === 'z' || e.key === 'Z') state.showSafeZones = !state.showSafeZones;
 });
 
 // Acceso desde la consola del navegador para pruebas:
@@ -3939,17 +4478,20 @@ window.game = {
   state, resetGame, tick, setTheme, onChatCommand, msUntilThemeRotation, spawnItem,
   handleTikTokEvent, registerTeam, getTeamCounts, triggerVictoryDance, checkVictoryInminent, loadGiftMapping,
   get GIFT_MAPPING() { return GIFT_MAPPING; },
-  playSound, say, setAudioSettings, spokenName, displayHandle, isNameOffensive, audio,
+  playSound, say, setAudioSettings, spokenName, displayHandle, isNameOffensive, audio, engagement, ENGAGEMENT, topDonors,
   THEMES, FLAG_RENDERERS, ITEM_TYPES, AI_CONFIG, DANCE_PATTERNS,
 };
 
 loadBlockedUsers();
 buildBannedMatchers();
+loadSessionDonors();
 initAudio();
 resetGame();
 requestAnimationFrame(frame);
 loadSettings();
 loadNameFilter();
+loadGiftCatalog();
+setInterval(loadGiftCatalog, 60000);
 loadGiftMapping();
 connectToBridge();
 setInterval(reportGameStatus, GAME_STATUS_INTERVAL_MS);

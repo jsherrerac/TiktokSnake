@@ -8,65 +8,206 @@
     "text: lo que se muestra en las instrucciones en pantalla (se generan solas desde este archivo)."
   ],
   "tiers": [
-    { "id": "T1", "minDiamonds": 1, "label": "pequeño" },
-    { "id": "T2", "minDiamonds": 5, "label": "mediano" },
-    { "id": "T3", "minDiamonds": 30, "label": "grande" },
-    { "id": "T4", "minDiamonds": 100, "label": "enorme" },
-    { "id": "T5", "minDiamonds": 500, "label": "épico" }
+    {
+      "id": "T1",
+      "minDiamonds": 1,
+      "label": "pequeño"
+    },
+    {
+      "id": "T2",
+      "minDiamonds": 5,
+      "label": "mediano"
+    },
+    {
+      "id": "T3",
+      "minDiamonds": 30,
+      "label": "grande"
+    },
+    {
+      "id": "T4",
+      "minDiamonds": 100,
+      "label": "enorme"
+    },
+    {
+      "id": "T5",
+      "minDiamonds": 500,
+      "label": "épico"
+    }
   ],
   "overrides": {
     "byGiftId": {},
     "byName": {}
   },
   "pvp": {
-    "T1": { "text": "comida extra para tu equipo", "actions": [{ "do": "megaFood", "target": "ally" }] },
-    "T2": { "text": "velocidad para tu equipo", "actions": [{ "do": "speed", "target": "ally" }] },
+    "T1": {
+      "text": "comida extra para tu equipo",
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "ally"
+        }
+      ]
+    },
+    "T2": {
+      "text": "velocidad para tu equipo",
+      "actions": [
+        {
+          "do": "speed",
+          "target": "ally"
+        }
+      ]
+    },
     "T3": {
       "text": "muro delante del rival",
-      "actions": [{ "do": "wallLine", "target": "rival", "length": 3, "minDistance": 3, "maxDistance": 4 }]
+      "actions": [
+        {
+          "do": "wallLine",
+          "target": "rival",
+          "length": 3,
+          "minDistance": 3,
+          "maxDistance": 4
+        }
+      ]
     },
     "T4": {
       "text": "bomba teledirigida al rival",
-      "actions": [{ "do": "homingBomb", "target": "rival", "pattern": "ahead", "distance": 2 }]
+      "actions": [
+        {
+          "do": "homingBomb",
+          "target": "rival",
+          "pattern": "ahead",
+          "distance": 2
+        }
+      ]
     },
     "T5": {
-      "text": "ATAQUE ÉPICO: 3 bombas al rival + 3 comidas",
+      "text": "ATAQUE ÉPICO al rival",
       "actions": [
-        { "do": "homingBomb", "target": "rival", "pattern": "trap", "distance": 2 },
-        { "do": "megaFood", "target": "ally", "count": 3 },
-        { "do": "epic" }
+        {
+          "do": "homingBomb",
+          "target": "rival",
+          "pattern": "trap",
+          "distance": 2
+        },
+        {
+          "do": "megaFood",
+          "target": "ally",
+          "count": 3
+        },
+        {
+          "do": "epic"
+        }
       ]
     }
   },
   "pvpNoTeam": {
-    "T1": { "text": "comida en el centro", "actions": [{ "do": "megaFood", "target": "center" }] },
-    "T2": { "text": "comida en el centro", "actions": [{ "do": "megaFood", "target": "center" }] },
-    "T3": { "useSolo": true },
-    "T4": { "useSolo": true },
-    "T5": { "useSolo": true }
+    "T1": {
+      "text": "comida en el centro",
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "center"
+        }
+      ]
+    },
+    "T2": {
+      "text": "comida en el centro",
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "center"
+        }
+      ]
+    },
+    "T3": {
+      "useSolo": true
+    },
+    "T4": {
+      "useSolo": true
+    },
+    "T5": {
+      "useSolo": true
+    }
   },
   "solo": {
     "T1": {
       "text": "comida o velocidad",
-      "actions": [{ "do": "random", "options": [{ "do": "megaFood", "target": "random" }, { "do": "speed", "target": "ally" }] }]
+      "actions": [
+        {
+          "do": "random",
+          "options": [
+            {
+              "do": "megaFood",
+              "target": "random"
+            },
+            {
+              "do": "speed",
+              "target": "ally"
+            }
+          ]
+        }
+      ]
     },
-    "T2": { "text": "un muro", "actions": [{ "do": "wall", "target": "random" }] },
-    "T3": { "text": "3 bombas", "actions": [{ "do": "bomb", "target": "random", "count": 3 }] },
+    "T2": {
+      "text": "un muro",
+      "actions": [
+        {
+          "do": "wall",
+          "target": "random"
+        }
+      ]
+    },
+    "T3": {
+      "text": "3 bombas",
+      "actions": [
+        {
+          "do": "bomb",
+          "target": "random",
+          "count": 3
+        }
+      ]
+    },
     "T4": {
       "text": "CAOS: bombas, muros y comida",
       "actions": [
-        { "do": "bomb", "target": "random", "count": 5 },
-        { "do": "wall", "target": "random", "count": 3 },
-        { "do": "megaFood", "target": "random", "count": 2 }
+        {
+          "do": "bomb",
+          "target": "random",
+          "count": 5
+        },
+        {
+          "do": "wall",
+          "target": "random",
+          "count": 3
+        },
+        {
+          "do": "megaFood",
+          "target": "random",
+          "count": 2
+        }
       ]
     },
     "T5": {
       "text": "CAOS ÉPICO",
       "actions": [
-        { "do": "bomb", "target": "random", "count": 5 },
-        { "do": "wall", "target": "random", "count": 3 },
-        { "do": "megaFood", "target": "random", "count": 2 },
-        { "do": "epic" }
+        {
+          "do": "bomb",
+          "target": "random",
+          "count": 5
+        },
+        {
+          "do": "wall",
+          "target": "random",
+          "count": 3
+        },
+        {
+          "do": "megaFood",
+          "target": "random",
+          "count": 2
+        },
+        {
+          "do": "epic"
+        }
       ]
     }
   },
@@ -74,24 +215,50 @@
     "pvp": {
       "teamGoal": 300,
       "teamText": "comida para tu equipo",
-      "teamActions": [{ "do": "megaFood", "target": "ally" }],
+      "teamActions": [
+        {
+          "do": "megaFood",
+          "target": "ally"
+        }
+      ],
       "globalGoal": 1000,
       "globalText": "lluvia de comida",
-      "globalActions": [{ "do": "megaFood", "target": "center", "count": 5 }]
+      "globalActions": [
+        {
+          "do": "megaFood",
+          "target": "center",
+          "count": 5
+        }
+      ]
     },
     "solo": {
       "goal": 100,
       "text": "comida extra",
-      "actions": [{ "do": "megaFood", "target": "random" }]
+      "actions": [
+        {
+          "do": "megaFood",
+          "target": "random"
+        }
+      ]
     }
   },
   "follow": {
     "text": "¡Gracias por seguir, @{user}!",
-    "actions": [{ "do": "megaFood", "target": "center" }]
+    "actions": [
+      {
+        "do": "megaFood",
+        "target": "center"
+      }
+    ]
   },
   "share": {
     "text": "velocidad para tu equipo",
-    "actions": [{ "do": "speed", "target": "userTeam" }]
+    "actions": [
+      {
+        "do": "speed",
+        "target": "userTeam"
+      }
+    ]
   },
   "queue": {
     "maxEffectsPerSecond": 10,

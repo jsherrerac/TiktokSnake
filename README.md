@@ -102,6 +102,19 @@ Todo es editable en el JSON y se recarga desde el panel ("Recargar gift-mapping.
 - Si Chrome arranca sin `--autoplay-policy=no-user-gesture-required`, el juego pide "Clic para activar el sonido".
 - Ajustes base en `config/settings.json` ("audio"); lo que se cambia en el panel se guarda en ese Chrome.
 
+### En pantalla (engagement)
+
+- **Feed de avisos** (arriba a la derecha del mapa, máx. 3): "@ana → 5× Rosa → +comida COLOMBIA", follows, metas de
+  likes. Foto de perfil si llega; si no, la inicial en un círculo del color del equipo. Las rachas se agrupan.
+- **Panel rotativo** (arriba a la izquierda, cada 9 s): cómo jugar, qué hace cada tier (generado desde
+  `gift-mapping.json`, con la imagen del regalo si está en el catálogo), meta de likes, diamantes de cada equipo en la
+  ronda (tira y afloja) y top 3 donadores de la sesión (se reinicia desde el panel).
+- Regalos T4 y T5: cartel grande con temblor, sonido del tier y voz.
+- **Ritmo**: intro "RONDA N · A vs B · 3-2-1 ¡YA!"; si pasan 45 s sin eventos de TikTok, un llamado a la acción
+  (como mucho 1 de cada 3 pide regalos) y un evento pequeño; cámara lenta de 400 ms en la muerte que decide la ronda.
+- Tecla **Z**: overlay de las zonas que tapa la UI de TikTok (aproximadas, ver `docs/RESEARCH.md`).
+- Ajustes en `config/settings.json` → `"engagement"` (tiempos, textos de los llamados, activar/desactivar paneles).
+
 ## Puente TikTok Live (`bridge/`)
 
 Configuración en `.env` en la raíz (copiar de `.env.example`; `.env` no va a git):

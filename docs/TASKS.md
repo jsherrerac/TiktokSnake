@@ -35,11 +35,11 @@ Leyenda: `[ ]` pendiente · `[x]` hecho · `[~]` parcial · `[!]` bloqueado (con
 - [x] Commit "audio: sfx procedural + kenney cc0, musica opcional, voz con filtro"
 
 ## Bloque 4: Engagement en pantalla
-- [ ] 4.1 Overlay de zonas seguras (tecla Z) + captura; propuesta de cambio de grid si hace falta (sin cambiarlo)
-- [ ] 4.2 Feed de alertas (máx 3, color de equipo, avatar o inicial); banner T4-T5 + temblor + sonido + voz
-- [ ] 4.3 Paneles: instrucciones automáticas desde el mapeo, meta de likes, tira y afloja, top 3 donadores (rotan si no caben)
-- [ ] 4.4 Ritmo: intro de ronda 3-2-1 ¡YA!, modo inactivo a los 45 s, cámara lenta 400 ms en la muerte decisiva
-- [ ] Commit "engagement: alertas, instrucciones automaticas, metas, ranking, ritmo"
+- [x] 4.1 Overlay de zonas seguras (tecla Z) + captura; propuesta de cambio de grid si hace falta (sin cambiarlo)
+- [x] 4.2 Feed de alertas (máx 3, color de equipo, avatar o inicial); banner T4-T5 + temblor + sonido + voz
+- [x] 4.3 Paneles: instrucciones automáticas desde el mapeo, meta de likes, tira y afloja, top 3 donadores (rotan si no caben)
+- [x] 4.4 Ritmo: intro de ronda 3-2-1 ¡YA!, modo inactivo a los 45 s, cámara lenta 400 ms en la muerte decisiva
+- [x] Commit "engagement: alertas, instrucciones automaticas, metas, ranking, ritmo"
 
 ## Bloque 5: Panel y operación 24/7
 - [ ] 5.1 Panel completo /control (temática, modo, pausa, saltar, recargar mapeo, audio, simulador, estado, resets, bloqueados)

@@ -11,6 +11,23 @@
     "musicOn": false,
     "soundSet": "procedural",
     "voiceMinTier": 3,
-    "voiceLangs": ["es-CO", "es-MX", "es-US", "es-419", "es-ES", "es"]
+    "voiceLangs": [
+      "es-CO",
+      "es-MX",
+      "es-US",
+      "es-419",
+      "es-ES",
+      "es"
+    ]
+  },
+  "engagement": {
+    "alertsFeed": true,
+    "infoPanel": true,
+    "infoRotateSeconds": 9,
+    "introMs": 2400,
+    "idleSeconds": 45,
+    "slowMotion": true,
+    "slowMotionMs": 400,
+    "slowMotionFactor": 0.3
   }
 }
