@@ -31,6 +31,7 @@ function connect() {
     } else if (data.kind === 'gameStatus') {
       lastGame = data;
       renderStatus();
+      renderAudio();
     } else if (data.kind === 'event') {
       addEvent(data.event);
     }
@@ -87,6 +88,59 @@ function renderStatus() {
   $('#status').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join('');
   $('#mock-toggle').checked = !!s.mock.enabled;
 }
+
+// ---------- Audio ----------
+function renderAudio() {
+  const a = lastGame && lastGame.audio;
+  if (!a) return;
+  const st = a.locked ? 'bloqueado: falta un clic en la ventana del juego' : `activo · voz: ${a.voice || 'ninguna'} · set kenney: ${a.kenney}`;
+  $('#audio-state').textContent = `(${st})`;
+  document.querySelectorAll('[data-audio]').forEach((el) => {
+    if (el === document.activeElement) return; // no pisar lo que se está tocando
+    const value = a.settings[el.dataset.audio];
+    if (el.type === 'checkbox') el.checked = !!value;
+    else el.value = value;
+  });
+  const box = $('#sound-buttons');
+  if (box.childElementCount !== a.sounds.length) {
+    box.innerHTML = '';
+    for (const name of a.sounds) {
+      const b = document.createElement('button');
+      b.textContent = name;
+      b.addEventListener('click', () => command('testSound', name));
+      box.appendChild(b);
+    }
+  }
+  const blocked = lastGame.blockedUsers || [];
+  const list = $('#blocked-list');
+  const key = blocked.join(',');
+  if (list.dataset.key !== key) {
+    list.dataset.key = key;
+    list.innerHTML = blocked.length ? '' : '<small>ninguno</small>';
+    for (const user of blocked) {
+      const b = document.createElement('button');
+      b.textContent = `${user} ✕`;
+      b.title = 'Desbloquear';
+      b.addEventListener('click', () => command('unblockUser', user));
+      list.appendChild(b);
+    }
+  }
+}
+
+document.querySelectorAll('[data-audio]').forEach((el) => {
+  el.addEventListener(el.type === 'range' ? 'input' : 'change', () => {
+    const key = el.dataset.audio;
+    let value = el.type === 'checkbox' ? el.checked : el.type === 'range' ? Number(el.value) : el.value;
+    if (key === 'voiceMinTier') value = Number(value);
+    command('setAudio', { [key]: value });
+  });
+});
+$('#test-voice').addEventListener('click', () => command('testVoice'));
+$('#block-add').addEventListener('click', () => {
+  const user = $('#block-user').value.trim().replace(/^@/, '');
+  if (user) command('blockUser', user);
+  $('#block-user').value = '';
+});
 
 function escapeHtml(text) {
   return text.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);

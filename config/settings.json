@@ -1,5 +1,16 @@
 {
   "showConnectionDot": true,
   "chatThemeCommand": "mods",
-  "joinTeamByName": true
+  "joinTeamByName": true,
+  "audio": {
+    "master": 0.8,
+    "sfx": 0.8,
+    "music": 0.25,
+    "tts": 1,
+    "voice": true,
+    "musicOn": false,
+    "soundSet": "procedural",
+    "voiceMinTier": 3,
+    "voiceLangs": ["es-CO", "es-MX", "es-US", "es-419", "es-ES", "es"]
+  }
 }

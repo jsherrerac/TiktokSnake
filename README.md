@@ -89,6 +89,19 @@ Todo es editable en el JSON y se recarga desde el panel ("Recargar gift-mapping.
 - **Crédito**: los items de regalos T3+ muestran el @usuario; si uno mata a una culebra sale
   "💥 @usuario eliminó a X" (o "¡Fuego amigo!"); al final de la ronda, el MVP (quien más diamantes regaló).
 
+### Audio
+
+- Dos sets de efectos (se cambian desde el panel): **procedural** (por defecto, sintetizado en código, sin archivos) y
+  **kenney** (CC0, `game/assets/sfx/kenney/`, licencias en `docs/LICENSES.md`).
+- Música de fondo opcional (procedural, apagada por defecto); baja sola cuando habla la voz.
+- **Voz** (`speechSynthesis`, voz es-CO → es-MX → es-US): solo plantillas fijas ("¡Gracias ana por la rosa!",
+  "¡ana eliminó a Argentina!", "¡Gana Colombia!", "¡Ataque épico de ana!"), desde el tier `voiceMinTier` (T3).
+  Nunca lee el chat. Cola de 3 frases como máximo.
+- **Nombres**: sin emojis ni símbolos, filtro de groserías editable en `config/name-filter.json` (si no pasa: "alguien").
+  Usuarios bloqueados desde el panel: no se muestran ni se leen ("anónimo"), sus regalos funcionan igual.
+- Si Chrome arranca sin `--autoplay-policy=no-user-gesture-required`, el juego pide "Clic para activar el sonido".
+- Ajustes base en `config/settings.json` ("audio"); lo que se cambia en el panel se guarda en ese Chrome.
+
 ## Puente TikTok Live (`bridge/`)
 
 Configuración en `.env` en la raíz (copiar de `.env.example`; `.env` no va a git):

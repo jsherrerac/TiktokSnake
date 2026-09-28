@@ -26,13 +26,13 @@ Leyenda: `[ ]` pendiente · `[x]` hecho · `[~]` parcial · `[!]` bloqueado (con
 - [x] Commit "fase 5: mapeo configurable, cola de eventos, credito al donante"
 
 ## Bloque 3: Audio
-- [ ] 3.1 AudioManager (buses sfx/music/tts, maestro, mute, control desde el panel)
-- [ ] 3.2 Sets "procedural" (default) y "kenney" (descarga CC0) + docs/LICENSES.md
-- [ ] 3.3 Todos los sonidos listados (comer con tono creciente, mega, speed + zumbido, bomba, explosión, muro, muerte, choque, 3-2-1-YA, temática, victoria, danza en bucle, tiers, meta likes, follow, unirse a equipo con límite; variación ±5 %; límite de instancias)
-- [ ] 3.4 Música opcional OFF, solo CC0, ducking con la voz
-- [ ] 3.5 Voz: español, plantillas fijas, tier mínimo, nombres saneados + filtro groserías editable, bloqueados, cola máx 3
-- [ ] 3.6 Pantalla "Clic para activar el sonido" solo si hace falta; verificar con flags
-- [ ] Commit "audio: sfx procedural + kenney cc0, musica opcional, voz con filtro"
+- [x] 3.1 AudioManager (buses sfx/music/tts, maestro, mute, control desde el panel)
+- [x] 3.2 Sets "procedural" (default) y "kenney" (descarga CC0) + docs/LICENSES.md
+- [x] 3.3 Todos los sonidos listados (comer con tono creciente, mega, speed + zumbido, bomba, explosión, muro, muerte, choque, 3-2-1-YA, temática, victoria, danza en bucle, tiers, meta likes, follow, unirse a equipo con límite; variación ±5 %; límite de instancias)
+- [x] 3.4 Música opcional OFF, solo CC0, ducking con la voz
+- [x] 3.5 Voz: español, plantillas fijas, tier mínimo, nombres saneados + filtro groserías editable, bloqueados, cola máx 3
+- [x] 3.6 Pantalla "Clic para activar el sonido" solo si hace falta; verificar con flags
+- [x] Commit "audio: sfx procedural + kenney cc0, musica opcional, voz con filtro"
 
 ## Bloque 4: Engagement en pantalla
 - [ ] 4.1 Overlay de zonas seguras (tecla Z) + captura; propuesta de cambio de grid si hace falta (sin cambiarlo)

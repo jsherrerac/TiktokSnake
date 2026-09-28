@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Panel Snake TikTok</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/control/control.css">
 </head>
 <body>
@@ -61,6 +62,44 @@
         <label class="grow">Chat <input id="chat-msg" placeholder="colombia · !team arg · hola"></label>
         <button id="send-chat">Enviar chat</button>
       </div>
+    </section>
+
+    <section class="card" id="audio-card">
+      <h2>Audio <small id="audio-state"></small></h2>
+      <div class="row">
+        <label>Maestro <input type="range" min="0" max="1" step="0.05" data-audio="master"></label>
+        <label>Efectos <input type="range" min="0" max="1" step="0.05" data-audio="sfx"></label>
+        <label>Música <input type="range" min="0" max="1" step="0.05" data-audio="music"></label>
+        <label>Voz <input type="range" min="0" max="1" step="0.05" data-audio="tts"></label>
+      </div>
+      <div class="row">
+        <label class="switch"><input type="checkbox" data-audio="muted"> Silencio total</label>
+        <label class="switch"><input type="checkbox" data-audio="voice"> Voz</label>
+        <label class="switch"><input type="checkbox" data-audio="musicOn"> Música de fondo</label>
+      </div>
+      <div class="row">
+        <label>Set de sonidos
+          <select data-audio="soundSet">
+            <option value="procedural">procedural (sin archivos)</option>
+            <option value="kenney">kenney (CC0)</option>
+          </select>
+        </label>
+        <label>Voz agradece desde
+          <select data-audio="voiceMinTier">
+            <option value="1">T1</option><option value="2">T2</option><option value="3">T3</option>
+            <option value="4">T4</option><option value="5">T5 (solo épicos)</option>
+          </select>
+        </label>
+        <button id="test-voice">Probar voz</button>
+      </div>
+      <h3>Escuchar cada sonido</h3>
+      <div class="row buttons" id="sound-buttons"></div>
+      <h3>Usuarios bloqueados <small>(no se muestran ni se leen; sus regalos funcionan igual, anónimos)</small></h3>
+      <div class="row">
+        <label class="grow">Usuario <input id="block-user" placeholder="usuario sin @"></label>
+        <button id="block-add" class="danger">Bloquear</button>
+      </div>
+      <div class="row buttons" id="blocked-list"></div>
     </section>
 
     <section class="card wide">

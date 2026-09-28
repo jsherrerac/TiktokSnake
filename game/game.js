@@ -10,6 +10,7 @@
    - Fase 5 (base): cliente WebSocket del puente TikTok, dispatcher de eventos y teams por chat (!team).
    - Fase 6: victory dance (la ganadora dibuja una figura con el cuerpo antes de cerrar la ronda).
    - Fase 5: regalos/likes/follows/shares -> efectos (config/gift-mapping.json), cola con prioridad y crédito al donante.
+   - Audio: efectos procedurales o CC0 (Kenney), música opcional, voz con plantillas fijas y filtro de nombres.
    ========================================================= */
 
 // ---------- Modo de juego ----------
@@ -143,7 +144,15 @@ async function loadConfigJson(name) {
 
 async function loadSettings() {
   const loaded = await loadConfigJson('settings.json');
-  if (loaded) Object.assign(SETTINGS, loaded);
+  if (!loaded) return;
+  Object.assign(SETTINGS, loaded);
+  // "audio" de settings.json es la base; lo guardado desde el panel en este navegador manda
+  if (loaded.audio && typeof loaded.audio === 'object') {
+    Object.assign(AUDIO_DEFAULTS, loaded.audio);
+    audio.settings = { ...AUDIO_DEFAULTS };
+    loadAudioSettings();
+    applyAudioSettings();
+  }
 }
 
 // Orden fijo: arriba, derecha, abajo, izquierda
@@ -183,6 +192,8 @@ const state = {
   alerts: [],                   // avisos de regalos/follows (el feed visual llega en el Bloque 4)
   floaters: [],                 // textos "+N" que suben y se desvanecen
   shake: { until: 0, magnitude: 0 },
+  audioLocked: false,           // el navegador aún no deja sonar audio (hace falta un clic)
+  lastCountdownNumber: null,
   metrics: { gifts: 0, units: 0, effects: 0, overflow: 0 },
   foods: [],
   items: [],          // { type, x, y, bornAt, expiresAt, meta }
@@ -571,6 +582,7 @@ function moveSnake(snake, now) {
     snake.score++;
     snake.growPending++;
     snake.ticksSinceFood = 0;
+    playEat(snake);
     spawnBurst(cellCenterX(next.x), cellCenterY(next.y), '#ff3b5c', 14);
   }
 
@@ -605,6 +617,7 @@ function collectItemAt(snake, cell, now) {
     snake.growPending += def.growth;
     snake.ticksSinceFood = 0;
     spawnBurst(px, py, def.color, 30);
+    playSound('megaFood');
     console.info(`[item] ${snake.name} come MEGA_FOOD (+${def.score}) en (${cell.x},${cell.y})`);
   } else if (item.type === 'SPEED') {
     state.items.splice(idx, 1);
@@ -616,7 +629,8 @@ function collectItemAt(snake, cell, now) {
     // La bomba queda un momento como decoración (onda expansiva) y luego desaparece
     item.meta.detonatedAt = now;
     item.expiresAt = now + def.decorationMs;
-    killSnake(snake, now);
+    killSnake(snake, now, true);
+    playSound('explosion');
     spawnBurst(px, py, def.color, 60);
     console.info(`[item] BOMB mata a ${snake.name} en (${cell.x},${cell.y})`);
     if (item.meta.donor) announceKill(item.meta, snake, now);
@@ -654,13 +668,18 @@ function stepSnakes(movers, now) {
       if (inBounds(c.x, c.y)) occupancy[cellIndex(c.x, c.y)]++;
     }
   }
+  const crashed = [];
   for (const snake of movers) {
     if (!snake.alive) continue; // ya murió por un item
     const h = snake.body[0];
     if (!inBounds(h.x, h.y) || occupancy[cellIndex(h.x, h.y)] > 1) {
-      killSnake(snake, now);
+      killSnake(snake, now, true);
+      crashed.push(snake);
     }
   }
+  // Dos que chocan en el mismo paso: choque de cabezas; si no, el sonido de muerte normal
+  if (crashed.length >= 2) playSound('headOn');
+  else if (crashed.length === 1) playSound('death');
 
   // 4) Reponer comida
   refillFoods(now);
@@ -809,6 +828,8 @@ function spawnItem(type, x, y, now = performance.now(), meta = {}) {
     meta: { ...meta },
   };
   state.items.push(item);
+  if (key === 'BOMB') playSound('bombSpawn');
+  else if (key === 'WALL') playSound('wallSpawn');
   console.info(`[item] ${key} en (${cell.x},${cell.y})`);
   return item;
 }
@@ -820,12 +841,15 @@ function applySpeedEffect(snake, now) {
   if (existing) existing.until = now + def.effectMs;
   else state.activeEffects.push({ snakeId: snake.id, type: 'SPEED', until: now + def.effectMs });
   snake.tickInterval = 1000 / def.tickRate;
+  playSound('speed');
+  startHum(snake);
 }
 
 function endEffect(effect) {
   const snake = state.snakes.find((s) => s.id === effect.snakeId);
   if (!snake || effect.type !== 'SPEED') return;
   snake.tickInterval = TICK_MS;
+  stopHum(snake.id);
   // Re-sincroniza su ritmo con el de una rival a velocidad normal, para que vuelvan a moverse
   // en el mismo paso (y el choque de cabezas simultáneo siga siendo posible)
   const rival = state.snakes.find((s) => s !== snake && s.alive && s.tickInterval === TICK_MS);
@@ -842,9 +866,12 @@ function expireItems(now) {
   for (const effect of expired) endEffect(effect);
 }
 
-function killSnake(snake, now = state.now) {
+// silent: quien la llama pone su propio sonido (explosión, choque de cabezas)
+function killSnake(snake, now = state.now, silent = false) {
   snake.alive = false;
   snake.deathTimestamp = now;
+  stopHum(snake.id);
+  if (!silent) playSound('death');
   // Congelamos la serpiente en su última posición válida (no dentro de la pared)
   snake.body = snake.prevBody;
   snake.moved = false;
@@ -855,6 +882,9 @@ function killSnake(snake, now = state.now) {
 
 function endRound(now) {
   state.phase = 'dead';
+  state.lastCountdownNumber = null;
+  stopDanceLoop();
+  stopAllHums();
   state.deathAt = now;
   for (const snake of state.snakes) {
     if (snake.score > state.bestScore) {
@@ -874,6 +904,12 @@ function endRound(now) {
     const survivors = state.snakes.filter((s) => s.alive);
     const winner = state.pendingWinner || (survivors.length === 1 ? survivors[0] : null);
     state.roundResult = { winner, danced, mvp };
+    if (winner) {
+      playSound('victory');
+      speakTemplate('win', { team: spokenTeam(winner) });
+    } else {
+      speakTemplate('draw');
+    }
     const s = getThemeStats(state.roundTheme);
     if (winner) s[`${winner.id}Wins`]++;
     else s.draws++;
@@ -885,6 +921,7 @@ function endRound(now) {
     );
   } else {
     state.roundResult = { winner: null, danced, mvp };
+    if (danced) playSound('victory');
     console.info(`[ronda ${state.round}] fin${danced ? ` (con danza ${state.dance.pattern})` : ''} · puntos ${scores} · ${seconds}s`);
   }
 }
@@ -900,6 +937,9 @@ function resetGame(now = performance.now()) {
   }
   state.roundTheme = state.currentTheme;
   state.round++;
+  stopAllHums();
+  stopDanceLoop();
+  if (state.round > 1) playSound('go');
   state.phase = 'playing';
   state.roundResult = null;
   state.roundStartedAt = now;
@@ -1099,6 +1139,7 @@ function triggerVictoryDance(snake, patternName, now = state.now) {
   state.phase = 'dancing';
   state.danceTriggered = true;
   state.dance = { snakeId: snake.id, pattern, startedAt: now, visited: [] };
+  startDanceLoop();
   if (state.mode === 'PVP') state.pendingWinner = snake;
   // Las demás se quedan quietas mirando (sin interpolar movimiento)
   for (const other of state.snakes) {
@@ -1226,6 +1267,7 @@ function setTheme(themeId, now = performance.now()) {
   if (themeId === state.currentTheme) return true; // sin cambio real: sin cartel
   state.currentTheme = themeId;
   state.themeBanner = { themeId, startedAt: now };
+  playSound('themeChange');
   console.info(`[tema] próxima ronda: ${THEMES[themeId].displayName}`);
   return true;
 }
@@ -1301,6 +1343,7 @@ function registerTeam(username, teamName) {
   state.knownUsers.add(username);
   if (previous === slot) return slot; // ya estaba en ese equipo: sin log ni sonido
   state.teams.set(username, slot);
+  playSound('teamJoin');
   const change = previous && previous !== slot ? ` (antes ${theme[previous].name})` : '';
   console.info(`[team] ${username} -> ${theme[slot].name} (${slot})${change}`);
   return slot;
@@ -1391,9 +1434,22 @@ function handleBridgeMessage(msg) {
   }
 }
 
+// Prueba del zumbido de SPEED desde el panel (2 s)
+function testHum() {
+  const fake = { id: 'test' };
+  startHum(fake);
+  setTimeout(() => stopHum('test'), 2000);
+}
+
 // Órdenes del panel de control (se amplían en el Bloque 5)
 const CONTROL_COMMANDS = {
   reloadMapping: () => loadGiftMapping(true),
+  setAudio: (patch) => setAudioSettings(patch || {}),
+  testSound: (name) => (name === 'speedHum' ? testHum() : playSound(name)),
+  testVoice: () => say('Prueba de voz. ¡Gana Colombia!'),
+  blockUser: (user) => setBlockedUser(user, true),
+  unblockUser: (user) => setBlockedUser(user, false),
+  reloadNameFilter: () => loadNameFilter(),
 };
 
 function handleControlCommand(command, args) {
@@ -1424,6 +1480,15 @@ function reportGameStatus() {
     queue: state.effectQueue.length,
     metrics: state.metrics,
     likes: state.likes,
+    audio: {
+      settings: audio.settings,
+      locked: state.audioLocked,
+      contextState: audio.ctx ? audio.ctx.state : 'none',
+      voice: tts.voice ? `${tts.voice.name} (${tts.voice.lang})` : null,
+      kenney: audio.kenneyState,
+      sounds: [...SOUND_NAMES, 'speedHum'],
+    },
+    blockedUsers: [...blockedUsers],
   });
 }
 
@@ -1800,6 +1865,12 @@ function processGiftEvent(event) {
   state.metrics.units += units;
   state.roundDonations.set(event.user, (state.roundDonations.get(event.user) || 0) + diamonds * units);
   pushAlert({ kind: 'gift', user: event.user, team, tier, units, giftName: event.giftName, event, text: rule && rule.text });
+  const tierNum = tierNumber(tier);
+  playSound(tierNum <= 1 ? 'giftSmall' : tierNum === 2 ? 'giftMedium' : 'giftBig');
+  // Voz: agradece desde el tier mínimo; el T5 lo anuncia el ataque épico
+  if (tierNum >= audio.settings.voiceMinTier && tierNum < 5) {
+    speakTemplate('gift', { name: spokenName(event.user), gift: spokenGiftName(event.giftName) });
+  }
   if (!rule || !Array.isArray(rule.actions)) {
     console.warn(`[regalo] sin regla para ${tier} (${state.mode}${team ? ', con equipo' : ''})`);
     return;
@@ -1825,6 +1896,7 @@ function processLikeEvent(event) {
       while (L[team] >= L[key]) {
         console.info(`[likes] meta de ${snakeBySlot(team) ? snakeBySlot(team).name : team}: ${L[key]} likes`);
         pushAlert({ kind: 'likeGoal', team, text: `¡${L[key]} likes! ${cfg.teamText}` });
+        playSound('likeGoal');
         enqueueEffect({ kind: 'like', tier: 'like', priority: 0.5, user: event.user, team, actions: cfg.teamActions });
         L[key] += cfg.teamGoal;
       }
@@ -1833,6 +1905,7 @@ function processLikeEvent(event) {
     while (L.total >= L.nextGlobal) {
       console.info(`[likes] meta global: ${L.nextGlobal} likes`);
       pushAlert({ kind: 'likeGoal', team: null, text: `¡${L.nextGlobal} likes! ${cfg.globalText}` });
+      playSound('likeGoal');
       enqueueEffect({ kind: 'like', tier: 'like', priority: 0.5, user: event.user, team: null, actions: cfg.globalActions });
       L.nextGlobal += cfg.globalGoal;
     }
@@ -1842,6 +1915,7 @@ function processLikeEvent(event) {
     while (L.total >= L.nextSolo) {
       console.info(`[likes] meta: ${L.nextSolo} likes`);
       pushAlert({ kind: 'likeGoal', team: null, text: `¡${L.nextSolo} likes! ${cfg.text}` });
+      playSound('likeGoal');
       enqueueEffect({ kind: 'like', tier: 'like', priority: 0.5, user: event.user, team: null, actions: cfg.actions });
       L.nextSolo += cfg.goal;
     }
@@ -1851,6 +1925,7 @@ function processLikeEvent(event) {
 function processFollowEvent(event) {
   const cfg = GIFT_MAPPING.follow;
   pushAlert({ kind: 'follow', user: event.user, team: teamOf(event.user), text: cfg.text.replace('{user}', displayHandle(event.user)) });
+  playSound('follow');
   enqueueEffect({ kind: 'follow', tier: 'follow', priority: 0.5, user: event.user, team: teamOf(event.user), actions: cfg.actions });
 }
 
@@ -2135,6 +2210,8 @@ function spawnHomingBombs(action, job, now) {
 function triggerEpic(job, now) {
   const team = job.team ? snakeBySlot(job.team) : null;
   showAnnouncement(`⚡ ATAQUE ÉPICO de @${displayHandle(job.user)} ⚡`, { color: team ? team.color : GOLD, durationMs: 2800, shakeMs: 700, shakePx: 16 });
+  playSound('giftEpic');
+  speakTemplate('epic', { name: spokenName(job.user) });
 }
 
 // "💥 @juan eliminó a ARGENTINA" (o fuego amigo si la víctima es de su propio equipo)
@@ -2144,6 +2221,7 @@ function announceKill(meta, victim, now) {
   console.info(`[regalo] ${meta.donor} ${friendly ? '(fuego amigo) alcanzó a' : 'eliminó a'} ${victim.name} con ${meta.giftName || 'un regalo'}`);
   const text = friendly ? `💥 ¡Fuego amigo! @${displayHandle(meta.donor)} alcanzó a ${victim.name}` : `💥 @${displayHandle(meta.donor)} eliminó a ${victim.name}`;
   showAnnouncement(text, { color: team ? team.color : '#ff5570', durationMs: 3000, shakeMs: 400, shakePx: 10 });
+  if (!friendly) speakTemplate('kill', { name: spokenName(meta.donor), team: spokenTeam(victim) });
 }
 
 function getRoundMvp() {
@@ -2156,12 +2234,16 @@ function getRoundMvp() {
 
 // ---------- Nombres en pantalla ----------
 // @usuario apto para mostrar: sin emojis ni símbolos raros, máximo 14 caracteres.
-// (El filtro de groserías y la lista de bloqueados se añaden en el Bloque 3.)
-function displayHandle(user, max = 14) {
+// Usuarios bloqueados -> "anónimo"; nombres que no pasan el filtro de groserías -> "alguien".
+function displayHandle(user, max = NAME_FILTER.maxShownLength || 14) {
+  if (isBlockedUser(user)) return 'anónimo';
   const clean = String(user || '').replace(/^@/, '').replace(/[^\p{L}\p{N}._]/gu, '');
-  if (!clean) return 'alguien';
+  if (!clean || isNameOffensive(clean)) return 'alguien';
   return clean.length > max ? clean.slice(0, max - 1) + '…' : clean;
 }
+
+// Nombre de equipo para la voz ("COLOMBIA" -> "Colombia")
+const spokenTeam = (snake) => (snake ? snake.name.charAt(0) + snake.name.slice(1).toLowerCase() : '');
 
 // ---------- Avisos, carteles y textos flotantes ----------
 const MAX_ALERTS = 3;
@@ -2185,6 +2267,674 @@ function addFloater(text, x, y, color) {
 
 function startShake(ms, px, now) {
   state.shake = { until: now + ms, magnitude: px, duration: ms };
+}
+
+// ---------- Audio ----------
+// Buses: sfx y música (Web Audio) y voz (speechSynthesis, fuera de Web Audio). Volumen maestro y mute.
+// Dos sets de efectos: "procedural" (sintetizado aquí, sin archivos, por defecto) y "kenney" (CC0, en assets/sfx/kenney).
+// Ajustes: config/settings.json ("audio") como base; lo que se cambie desde el panel se guarda en este navegador.
+const AUDIO_STORAGE_KEY = 'snakeTikTok.audio';
+const AUDIO_DEFAULTS = {
+  master: 0.8,
+  sfx: 0.8,
+  music: 0.25,
+  tts: 1,
+  muted: false,
+  voice: true,
+  musicOn: false,          // música de fondo: apagada por defecto
+  soundSet: 'procedural',  // 'procedural' | 'kenney'
+  voiceMinTier: 3,         // la voz agradece regalos desde este tier
+  voiceLangs: ['es-CO', 'es-MX', 'es-US', 'es-419', 'es-ES', 'es'],
+};
+const PITCH_VARIATION = 0.05; // ±5 % en los sonidos repetitivos
+const EAT_COMBO_RESET_MS = 2000;
+const KENNEY_DIR = 'assets/sfx/kenney';
+// Los .ogg de Kenney vienen mucho más fuertes que la síntesis (picos medidos ~0.5-1.1 frente a ~0.05-0.5)
+const KENNEY_GAIN = 0.3;
+
+const audio = {
+  ctx: null,
+  master: null,
+  buses: {},
+  settings: { ...AUDIO_DEFAULTS },
+  noiseBuffer: null,
+  active: {},          // sonido -> instancias sonando
+  lastAt: {},          // sonido -> última vez (anti-spam)
+  buffers: {},         // set kenney: sonido -> AudioBuffer
+  kenneyState: 'idle', // idle | loading | ready | failed
+  hums: new Map(),     // snakeId -> nodos del zumbido de SPEED
+  danceTimer: null,
+  eatCombo: new Map(), // snakeId -> { count, at }
+  music: null,
+  ducked: false,
+};
+
+function loadAudioSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(AUDIO_STORAGE_KEY));
+    if (saved && typeof saved === 'object') Object.assign(audio.settings, saved);
+  } catch (e) {
+    /* sin preferencias guardadas */
+  }
+}
+
+function saveAudioSettings() {
+  try {
+    localStorage.setItem(AUDIO_STORAGE_KEY, JSON.stringify(audio.settings));
+  } catch (e) {
+    /* sin persistencia */
+  }
+}
+
+function initAudio() {
+  loadAudioSettings();
+  try {
+    audio.ctx = new AudioContext();
+  } catch (e) {
+    console.warn('[audio] Web Audio no disponible');
+    return;
+  }
+  const c = audio.ctx;
+  // Compresor en la salida: una ráfaga de regalos no satura
+  const comp = c.createDynamicsCompressor();
+  comp.threshold.value = -14;
+  comp.ratio.value = 6;
+  comp.connect(c.destination);
+  audio.master = c.createGain();
+  audio.master.connect(comp);
+  for (const bus of ['sfx', 'music']) {
+    audio.buses[bus] = c.createGain();
+    audio.buses[bus].connect(audio.master);
+  }
+  audio.noiseBuffer = c.createBuffer(1, c.sampleRate, c.sampleRate);
+  const data = audio.noiseBuffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  applyAudioSettings();
+  // Sin gesto del usuario Chrome arranca el audio suspendido (salvo con --autoplay-policy=no-user-gesture-required)
+  state.audioLocked = c.state !== 'running';
+  c.onstatechange = () => {
+    state.audioLocked = c.state !== 'running';
+    if (!state.audioLocked) console.info('[audio] activo');
+  };
+  if (state.audioLocked) console.info('[audio] suspendido hasta un clic (arranca Chrome con --autoplay-policy=no-user-gesture-required para evitarlo)');
+  const unlock = () => {
+    if (audio.ctx.state !== 'running') audio.ctx.resume();
+  };
+  window.addEventListener('pointerdown', unlock);
+  window.addEventListener('keydown', unlock);
+}
+
+function applyAudioSettings() {
+  const s = audio.settings;
+  if (!audio.ctx) return;
+  const t = audio.ctx.currentTime;
+  audio.master.gain.setTargetAtTime(s.muted ? 0 : s.master, t, 0.02);
+  audio.buses.sfx.gain.setTargetAtTime(s.sfx, t, 0.02);
+  audio.buses.music.gain.setTargetAtTime(s.music * (audio.ducked ? 0.3 : 1), t, 0.15);
+  if (s.soundSet === 'kenney') loadKenneySet();
+  if (s.musicOn) startMusic();
+  else stopMusic();
+}
+
+// Cambia ajustes (desde el panel) y los guarda
+function setAudioSettings(patch) {
+  for (const key of Object.keys(AUDIO_DEFAULTS)) {
+    if (patch[key] !== undefined) audio.settings[key] = patch[key];
+  }
+  saveAudioSettings();
+  applyAudioSettings();
+  if (patch.voice === false || patch.muted === true) stopSpeaking();
+}
+
+// ---------- Síntesis procedural ----------
+function synthTone(t0, { freq, dur, type = 'sine', gain = 0.25, attack = 0.005, slideTo = null, delay = 0, rate = 1, dest }) {
+  const c = audio.ctx;
+  const osc = c.createOscillator();
+  const g = c.createGain();
+  const start = t0 + delay;
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq * rate, start);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo * rate), start + dur);
+  g.gain.setValueAtTime(0.0001, start);
+  g.gain.exponentialRampToValueAtTime(gain, start + attack);
+  g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+  osc.connect(g);
+  g.connect(dest);
+  osc.start(start);
+  osc.stop(start + dur + 0.03);
+  return delay + dur;
+}
+
+function synthNoise(t0, { dur, gain = 0.25, filter = 'lowpass', freq = 1200, freqTo = null, q = 1, delay = 0, dest }) {
+  const c = audio.ctx;
+  const src = c.createBufferSource();
+  src.buffer = audio.noiseBuffer;
+  const f = c.createBiquadFilter();
+  f.type = filter;
+  f.Q.value = q;
+  const g = c.createGain();
+  const start = t0 + delay;
+  f.frequency.setValueAtTime(freq, start);
+  if (freqTo) f.frequency.exponentialRampToValueAtTime(Math.max(20, freqTo), start + dur);
+  g.gain.setValueAtTime(0.0001, start);
+  g.gain.exponentialRampToValueAtTime(gain, start + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+  src.connect(f);
+  f.connect(g);
+  g.connect(dest);
+  src.start(start, Math.random() * 0.5);
+  src.stop(start + dur + 0.03);
+  return delay + dur;
+}
+
+// Notas (Hz) para melodías
+const NOTE = { C5: 523.25, D5: 587.33, E5: 659.25, G5: 783.99, A5: 880, C6: 1046.5, E6: 1318.5, G6: 1568, C4: 261.63, G4: 392, A4: 440, E4: 329.63, F4: 349.23 };
+
+// Cada sonido: synth(t0, rate, dest) -> duración en s. maxInstances y minGapMs limitan el spam.
+const SOUND_DEFS = {
+  eat: { maxInstances: 3, synth: (t, r, d) => synthTone(t, { freq: 620, slideTo: 930, dur: 0.08, type: 'square', gain: 0.1, rate: r, dest: d }) },
+  megaFood: {
+    maxInstances: 2,
+    synth: (t, r, d) => {
+      [NOTE.C5, NOTE.E5, NOTE.G5, NOTE.C6].forEach((f, i) => synthTone(t, { freq: f, dur: 0.12, type: 'triangle', gain: 0.22, delay: i * 0.06, rate: r, dest: d }));
+      synthNoise(t, { dur: 0.3, gain: 0.06, filter: 'highpass', freq: 6000, delay: 0.1, dest: d });
+      return 0.42;
+    },
+  },
+  speed: {
+    maxInstances: 2,
+    synth: (t, r, d) => {
+      synthNoise(t, { dur: 0.35, gain: 0.18, filter: 'bandpass', freq: 400, freqTo: 3200, q: 3, dest: d });
+      return synthTone(t, { freq: 180, slideTo: 720, dur: 0.3, type: 'sawtooth', gain: 0.08, rate: r, dest: d });
+    },
+  },
+  bombSpawn: {
+    maxInstances: 2,
+    minGapMs: 60,
+    synth: (t, r, d) => {
+      synthTone(t, { freq: 1900, dur: 0.03, type: 'square', gain: 0.1, rate: r, dest: d });
+      return synthTone(t, { freq: 1500, dur: 0.03, type: 'square', gain: 0.08, delay: 0.09, rate: r, dest: d });
+    },
+  },
+  explosion: {
+    maxInstances: 3,
+    synth: (t, r, d) => {
+      synthNoise(t, { dur: 0.7, gain: 0.55, filter: 'lowpass', freq: 3500, freqTo: 180, dest: d });
+      return synthTone(t, { freq: 130, slideTo: 38, dur: 0.55, type: 'sine', gain: 0.5, rate: r, dest: d });
+    },
+  },
+  wallSpawn: {
+    maxInstances: 2,
+    minGapMs: 80,
+    synth: (t, r, d) => {
+      synthNoise(t, { dur: 0.12, gain: 0.2, filter: 'lowpass', freq: 700, dest: d });
+      return synthTone(t, { freq: 95, slideTo: 60, dur: 0.16, type: 'square', gain: 0.16, rate: r, dest: d });
+    },
+  },
+  death: {
+    maxInstances: 2,
+    synth: (t, r, d) => {
+      synthNoise(t, { dur: 0.25, gain: 0.15, filter: 'lowpass', freq: 1500, dest: d });
+      return synthTone(t, { freq: 440, slideTo: 90, dur: 0.55, type: 'sawtooth', gain: 0.14, rate: r, dest: d });
+    },
+  },
+  headOn: {
+    maxInstances: 1,
+    synth: (t, r, d) => {
+      synthNoise(t, { dur: 0.9, gain: 0.6, filter: 'lowpass', freq: 4000, freqTo: 150, dest: d });
+      synthTone(t, { freq: 300, slideTo: 60, dur: 0.7, type: 'sawtooth', gain: 0.18, rate: r, dest: d });
+      return synthTone(t, { freq: 317, slideTo: 64, dur: 0.7, type: 'sawtooth', gain: 0.18, rate: r, dest: d });
+    },
+  },
+  countBeep: { maxInstances: 1, vary: false, synth: (t, r, d) => synthTone(t, { freq: 660, dur: 0.14, type: 'square', gain: 0.14, dest: d }) },
+  go: {
+    maxInstances: 1,
+    vary: false,
+    synth: (t, r, d) => {
+      synthTone(t, { freq: 990, dur: 0.4, type: 'square', gain: 0.14, dest: d });
+      return synthTone(t, { freq: 1320, dur: 0.4, type: 'triangle', gain: 0.14, delay: 0.04, dest: d });
+    },
+  },
+  themeChange: {
+    maxInstances: 1,
+    synth: (t, r, d) => {
+      synthNoise(t, { dur: 0.5, gain: 0.15, filter: 'bandpass', freq: 250, freqTo: 4500, q: 2, dest: d });
+      synthTone(t, { freq: NOTE.C6, dur: 0.3, type: 'sine', gain: 0.15, delay: 0.3, dest: d });
+      return synthTone(t, { freq: NOTE.E6, dur: 0.4, type: 'sine', gain: 0.15, delay: 0.42, dest: d });
+    },
+  },
+  victory: {
+    maxInstances: 1,
+    vary: false,
+    synth: (t, r, d) => {
+      [NOTE.C5, NOTE.E5, NOTE.G5].forEach((f, i) => synthTone(t, { freq: f, dur: 0.14, type: 'square', gain: 0.12, delay: i * 0.12, dest: d }));
+      [NOTE.C6, NOTE.E6, NOTE.G6].forEach((f) => synthTone(t, { freq: f / 2, dur: 0.8, type: 'triangle', gain: 0.12, delay: 0.36, dest: d }));
+      return synthTone(t, { freq: NOTE.C6, dur: 0.8, type: 'square', gain: 0.1, delay: 0.36, dest: d });
+    },
+  },
+  danceTwinkle: {
+    maxInstances: 3,
+    synth: (t, r, d) => {
+      const notes = [NOTE.C6, NOTE.E6, NOTE.G6, NOTE.A5 * 2, NOTE.D5 * 2];
+      return synthTone(t, { freq: notes[Math.floor(Math.random() * notes.length)], dur: 0.25, type: 'sine', gain: 0.07, rate: r, dest: d });
+    },
+  },
+  giftSmall: {
+    maxInstances: 3,
+    synth: (t, r, d) => {
+      synthTone(t, { freq: NOTE.A5, dur: 0.18, type: 'triangle', gain: 0.16, rate: r, dest: d });
+      return synthTone(t, { freq: NOTE.E6, dur: 0.22, type: 'triangle', gain: 0.12, delay: 0.06, rate: r, dest: d });
+    },
+  },
+  giftMedium: {
+    maxInstances: 3,
+    synth: (t, r, d) => {
+      [NOTE.E5, NOTE.A5, NOTE.E6].forEach((f, i) => synthTone(t, { freq: f, dur: 0.16, type: 'triangle', gain: 0.18, delay: i * 0.07, rate: r, dest: d }));
+      return 0.36;
+    },
+  },
+  giftBig: {
+    maxInstances: 2,
+    synth: (t, r, d) => {
+      [NOTE.C5, NOTE.E5, NOTE.G5, NOTE.C6, NOTE.E6].forEach((f, i) => synthTone(t, { freq: f, dur: 0.18, type: 'square', gain: 0.1, delay: i * 0.07, rate: r, dest: d }));
+      synthNoise(t, { dur: 0.5, gain: 0.08, filter: 'highpass', freq: 5000, delay: 0.25, dest: d });
+      return 0.75;
+    },
+  },
+  giftEpic: {
+    maxInstances: 1,
+    vary: false,
+    synth: (t, r, d) => {
+      synthTone(t, { freq: 90, slideTo: 40, dur: 0.8, type: 'sine', gain: 0.5, dest: d });
+      synthNoise(t, { dur: 0.8, gain: 0.3, filter: 'lowpass', freq: 2500, freqTo: 200, dest: d });
+      [NOTE.C5, NOTE.E5, NOTE.G5].forEach((f) => synthTone(t, { freq: f, dur: 0.9, type: 'square', gain: 0.08, delay: 0.15, dest: d }));
+      [NOTE.C6, NOTE.E6, NOTE.G6].forEach((f) => synthTone(t, { freq: f, dur: 0.9, type: 'square', gain: 0.07, delay: 0.55, dest: d }));
+      return 1.5;
+    },
+  },
+  likeGoal: {
+    maxInstances: 2,
+    synth: (t, r, d) => {
+      [NOTE.G5, NOTE.C6, NOTE.E6, NOTE.G6].forEach((f, i) => synthTone(t, { freq: f, dur: 0.14, type: 'sine', gain: 0.16, delay: i * 0.08, rate: r, dest: d }));
+      return 0.5;
+    },
+  },
+  follow: {
+    maxInstances: 2,
+    synth: (t, r, d) => {
+      synthTone(t, { freq: NOTE.G5, dur: 0.16, type: 'triangle', gain: 0.16, rate: r, dest: d });
+      return synthTone(t, { freq: NOTE.C6, dur: 0.3, type: 'triangle', gain: 0.16, delay: 0.12, rate: r, dest: d });
+    },
+  },
+  teamJoin: { maxInstances: 1, minGapMs: 300, synth: (t, r, d) => synthTone(t, { freq: 520, slideTo: 800, dur: 0.07, type: 'sine', gain: 0.1, rate: r, dest: d }) },
+};
+
+// Sonidos pensados para el botón "probar" del panel
+const SOUND_NAMES = Object.keys(SOUND_DEFS);
+
+// ---------- Set kenney (archivos CC0) ----------
+async function loadKenneySet() {
+  if (audio.kenneyState !== 'idle' || !audio.ctx) return;
+  if (!location.protocol.startsWith('http')) {
+    audio.kenneyState = 'failed';
+    console.warn('[audio] el set kenney necesita el juego servido por HTTP; se usa el procedural');
+    return;
+  }
+  audio.kenneyState = 'loading';
+  const names = [...SOUND_NAMES, 'speedHum'];
+  await Promise.all(
+    names.map(async (name) => {
+      try {
+        const res = await fetch(`${KENNEY_DIR}/${name}.ogg`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        audio.buffers[name] = await audio.ctx.decodeAudioData(await res.arrayBuffer());
+      } catch (e) {
+        console.warn(`[audio] kenney/${name}.ogg no se pudo cargar (${e.message}); ese sonido usará el procedural`);
+      }
+    })
+  );
+  audio.kenneyState = 'ready';
+  console.info(`[audio] set kenney listo (${Object.keys(audio.buffers).length} sonidos)`);
+}
+
+// Reproduce un efecto. pitch: multiplicador de tono (el combo de comer lo usa).
+function playSound(name, { pitch = 1 } = {}) {
+  const def = SOUND_DEFS[name];
+  if (!def || !audio.ctx || audio.ctx.state !== 'running' || audio.settings.muted) return;
+  const now = performance.now();
+  if ((audio.active[name] || 0) >= (def.maxInstances || 4)) return;
+  if (def.minGapMs && now - (audio.lastAt[name] || 0) < def.minGapMs) return;
+  audio.lastAt[name] = now;
+  const rate = pitch * (def.vary === false ? 1 : 1 + (Math.random() * 2 - 1) * PITCH_VARIATION);
+  audio.active[name] = (audio.active[name] || 0) + 1;
+  let duration;
+  const buffer = audio.settings.soundSet === 'kenney' ? audio.buffers[name] : null;
+  if (buffer) {
+    const src = audio.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = rate;
+    const g = audio.ctx.createGain();
+    g.gain.value = KENNEY_GAIN;
+    src.connect(g);
+    g.connect(audio.buses.sfx);
+    src.start();
+    duration = buffer.duration / rate;
+  } else {
+    duration = def.synth(audio.ctx.currentTime, rate, audio.buses.sfx);
+  }
+  setTimeout(() => {
+    audio.active[name] = Math.max(0, (audio.active[name] || 1) - 1);
+  }, duration * 1000 + 60);
+}
+
+// Comer: el tono sube un semitono por comida seguida (hasta una octava); se reinicia tras 2 s sin comer
+function playEat(snake) {
+  const now = performance.now();
+  const combo = audio.eatCombo.get(snake.id);
+  const count = combo && now - combo.at < EAT_COMBO_RESET_MS ? Math.min(12, combo.count + 1) : 0;
+  audio.eatCombo.set(snake.id, { count, at: now });
+  playSound('eat', { pitch: Math.pow(2, count / 12) });
+}
+
+// Zumbido suave mientras dura SPEED
+function startHum(snake) {
+  if (!audio.ctx || audio.hums.has(snake.id)) return;
+  const c = audio.ctx;
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.0001, c.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.05, c.currentTime + 0.2);
+  g.connect(audio.buses.sfx);
+  const nodes = { g, sources: [] };
+  const buffer = audio.settings.soundSet === 'kenney' ? audio.buffers.speedHum : null;
+  if (buffer) {
+    const src = c.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    src.connect(g);
+    src.start();
+    g.gain.exponentialRampToValueAtTime(0.25, c.currentTime + 0.2);
+    nodes.sources.push(src);
+  } else {
+    const osc = c.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = snake.id === 'p1' ? 72 : 81;
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 320;
+    const lfo = c.createOscillator();
+    const lfoGain = c.createGain();
+    lfo.frequency.value = 7;
+    lfoGain.gain.value = 60;
+    lfo.connect(lfoGain);
+    lfoGain.connect(lp.frequency);
+    osc.connect(lp);
+    lp.connect(g);
+    osc.start();
+    lfo.start();
+    nodes.sources.push(osc, lfo);
+  }
+  audio.hums.set(snake.id, nodes);
+}
+
+function stopHum(snakeId) {
+  const nodes = audio.hums.get(snakeId);
+  if (!nodes) return;
+  audio.hums.delete(snakeId);
+  const t = audio.ctx.currentTime;
+  nodes.g.gain.setTargetAtTime(0.0001, t, 0.08);
+  for (const s of nodes.sources) s.stop(t + 0.4);
+}
+
+function stopAllHums() {
+  for (const id of [...audio.hums.keys()]) stopHum(id);
+}
+
+// Brillo en bucle durante la danza
+function startDanceLoop() {
+  stopDanceLoop();
+  audio.danceTimer = setInterval(() => {
+    if (state.phase !== 'dancing') return stopDanceLoop();
+    playSound('danceTwinkle');
+  }, 230);
+}
+
+function stopDanceLoop() {
+  if (audio.danceTimer) clearInterval(audio.danceTimer);
+  audio.danceTimer = null;
+}
+
+// ---------- Música de fondo (procedural, opcional, apagada por defecto) ----------
+// Progresión suave Am - F - C - G con arpegio; se programa con un poco de antelación.
+const MUSIC_CHORDS = [
+  [220.0, 261.63, 329.63], // La menor
+  [174.61, 220.0, 261.63], // Fa
+  [130.81, 164.81, 196.0], // Do
+  [196.0, 246.94, 293.66], // Sol
+];
+const MUSIC_STEP_S = 0.3;
+
+function startMusic() {
+  if (audio.music || !audio.ctx) return;
+  audio.music = { step: 0, nextTime: audio.ctx.currentTime + 0.1, timer: null };
+  audio.music.timer = setInterval(scheduleMusic, 100);
+}
+
+function stopMusic() {
+  if (!audio.music) return;
+  clearInterval(audio.music.timer);
+  audio.music = null;
+}
+
+function scheduleMusic() {
+  const m = audio.music;
+  if (!m || audio.ctx.state !== 'running') return;
+  while (m.nextTime < audio.ctx.currentTime + 0.4) {
+    const chord = MUSIC_CHORDS[Math.floor(m.step / 8) % MUSIC_CHORDS.length];
+    const dest = audio.buses.music;
+    if (m.step % 8 === 0) chord.forEach((f) => synthTone(m.nextTime, { freq: f, dur: MUSIC_STEP_S * 8, type: 'triangle', gain: 0.05, attack: 0.3, dest }));
+    const arp = chord[m.step % 3] * 2;
+    synthTone(m.nextTime, { freq: arp, dur: MUSIC_STEP_S * 0.9, type: 'sine', gain: 0.035, attack: 0.02, dest });
+    m.nextTime += MUSIC_STEP_S;
+    m.step++;
+  }
+}
+
+function duckMusic(on) {
+  audio.ducked = on;
+  if (audio.ctx) audio.buses.music.gain.setTargetAtTime(audio.settings.music * (on ? 0.3 : 1), audio.ctx.currentTime, 0.15);
+}
+
+// ---------- Voz (speechSynthesis) ----------
+// Solo plantillas fijas (nunca lee mensajes del chat), nombres saneados, cola de máx. 3 (se descartan los más viejos).
+const VOICE_TEMPLATES = {
+  gift: '¡Gracias {name} por {gift}!',
+  kill: '¡{name} eliminó a {team}!',
+  win: '¡Gana {team}!',
+  draw: '¡Empate!',
+  epic: '¡Ataque épico de {name}!',
+};
+const MAX_VOICE_QUEUE = 3;
+const VOICE_WATCHDOG_MS = 9000; // Chrome a veces no dispara onend: no dejar la cola atascada
+// Nombres de regalos frecuentes en español (TikTok suele mandarlos en inglés)
+const GIFT_NAMES_ES = { rose: 'la rosa', tiktok: 'el TikTok', 'finger heart': 'el corazón', doughnut: 'la dona', 'hand hearts': 'los corazones', 'perfume': 'el perfume', lion: 'el león', universe: 'el universo', galaxy: 'la galaxia', 'ice cream cone': 'el helado', 'heart me': 'el corazón' };
+
+const tts = { queue: [], speaking: false, watchdog: null, voice: null, recent: new Map() };
+
+function pickVoice() {
+  if (!('speechSynthesis' in window)) return null;
+  const voices = speechSynthesis.getVoices();
+  for (const lang of audio.settings.voiceLangs) {
+    const l = lang.toLowerCase();
+    const v = voices.find((x) => x.lang.toLowerCase() === l) || voices.find((x) => x.lang.toLowerCase().startsWith(l));
+    if (v) return v;
+  }
+  return null;
+}
+
+if ('speechSynthesis' in window) {
+  speechSynthesis.onvoiceschanged = () => {
+    tts.voice = pickVoice();
+    if (tts.voice) console.info(`[voz] ${tts.voice.name} (${tts.voice.lang})`);
+  };
+}
+
+function speakTemplate(key, vars = {}) {
+  const template = VOICE_TEMPLATES[key];
+  if (!template) return;
+  const text = template.replace(/\{(\w+)\}/g, (_, k) => (vars[k] !== undefined ? String(vars[k]) : ''));
+  say(text);
+}
+
+function say(text) {
+  if (!audio.settings.voice || audio.settings.muted || !('speechSynthesis' in window)) return;
+  // La misma frase dos veces seguidas en pocos segundos no aporta (rachas)
+  const last = tts.recent.get(text);
+  if (last && performance.now() - last < 5000) return;
+  tts.recent.set(text, performance.now());
+  if (tts.recent.size > 50) tts.recent.clear();
+  tts.queue.push(text);
+  while (tts.queue.length > MAX_VOICE_QUEUE) tts.queue.shift();
+  pumpVoice();
+}
+
+function pumpVoice() {
+  if (tts.speaking || tts.queue.length === 0) return;
+  const text = tts.queue.shift();
+  if (!tts.voice) tts.voice = pickVoice();
+  const u = new SpeechSynthesisUtterance(text);
+  if (tts.voice) u.voice = tts.voice;
+  u.lang = tts.voice ? tts.voice.lang : 'es-ES';
+  u.volume = Math.min(1, audio.settings.master * audio.settings.tts);
+  u.rate = 1.05;
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(tts.watchdog);
+    tts.speaking = false;
+    if (tts.queue.length === 0) duckMusic(false);
+    setTimeout(pumpVoice, 150);
+  };
+  u.onend = finish;
+  u.onerror = (e) => {
+    if (e.error !== 'interrupted' && e.error !== 'canceled') console.warn(`[voz] error: ${e.error}`);
+    finish();
+  };
+  tts.speaking = true;
+  duckMusic(true);
+  speechSynthesis.speak(u);
+  tts.watchdog = setTimeout(() => {
+    speechSynthesis.cancel();
+    finish();
+  }, VOICE_WATCHDOG_MS);
+}
+
+function stopSpeaking() {
+  tts.queue = [];
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+}
+
+function spokenGiftName(giftName) {
+  const key = String(giftName || '').trim().toLowerCase();
+  if (GIFT_NAMES_ES[key]) return GIFT_NAMES_ES[key];
+  const clean = cleanText(giftName, 24);
+  return clean ? `el ${clean}` : 'el regalo';
+}
+
+// ---------- Nombres: filtro de groserías y usuarios bloqueados ----------
+// config/name-filter.json (editable). Se aplica igual a lo que se muestra y a lo que se lee.
+const BLOCKED_USERS_KEY = 'snakeTikTok.blockedUsers';
+let NAME_FILTER = { maxShownLength: 14, maxSpokenLength: 16, bannedWords: [] };
+let bannedMatchers = [];
+let blockedUsers = new Set();
+
+async function loadNameFilter() {
+  const loaded = await loadConfigJson('name-filter.json');
+  if (loaded && Array.isArray(loaded.bannedWords)) NAME_FILTER = loaded;
+  buildBannedMatchers();
+}
+
+// Minúsculas, sin tildes, leetspeak -> letras
+function normalizeForFilter(text) {
+  const leet = { 0: 'o', 1: 'i', 3: 'e', 4: 'a', 5: 's', 7: 't', '@': 'a', $: 's' };
+  return String(text)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[013457@$]/g, (ch) => leet[ch]);
+}
+
+const collapseRepeats = (s) => s.replace(/(.)\1+/g, '$1');
+
+function buildBannedMatchers() {
+  bannedMatchers = (NAME_FILTER.bannedWords || []).map((raw) => {
+    const substring = raw.endsWith('*');
+    const word = normalizeForFilter(raw.replace(/\*$/, '')).replace(/[^a-z]/g, '');
+    // Palabras con letras dobles (perra, polla) se comparan sin colapsar repeticiones, para no bloquear "pera"
+    const collapse = !/(.)\1/.test(word);
+    return { word: collapse ? collapseRepeats(word) : word, collapse, substring: substring || word.length >= 5 };
+  });
+}
+
+function isNameOffensive(name) {
+  const norm = normalizeForFilter(name);
+  const letters = norm.replace(/[^a-z]/g, '');
+  const tokens = norm.split(/[^a-z]+/).filter(Boolean);
+  return bannedMatchers.some((m) => {
+    if (!m.word) return false;
+    const hay = m.collapse ? collapseRepeats(letters) : letters;
+    if (m.substring) return hay.includes(m.word);
+    return tokens.some((t) => (m.collapse ? collapseRepeats(t) : t) === m.word);
+  });
+}
+
+// Texto apto para pantalla/voz: sin emojis ni símbolos raros
+function cleanText(text, max) {
+  const clean = String(text || '').replace(/^@/, '').replace(/[^\p{L}\p{N}._ ]/gu, '').trim();
+  return clean.length > max ? clean.slice(0, max - 1) + '…' : clean;
+}
+
+function loadBlockedUsers() {
+  try {
+    blockedUsers = new Set((JSON.parse(localStorage.getItem(BLOCKED_USERS_KEY)) || []).map((u) => String(u).toLowerCase()));
+  } catch (e) {
+    blockedUsers = new Set();
+  }
+}
+
+function setBlockedUser(user, blocked) {
+  const key = String(user || '').replace(/^@/, '').trim().toLowerCase();
+  if (!key) return;
+  if (blocked) blockedUsers.add(key);
+  else blockedUsers.delete(key);
+  try {
+    localStorage.setItem(BLOCKED_USERS_KEY, JSON.stringify([...blockedUsers]));
+  } catch (e) {
+    /* sin persistencia */
+  }
+  console.info(`[filtro] ${key} ${blocked ? 'bloqueado' : 'desbloqueado'}`);
+}
+
+const isBlockedUser = (user) => blockedUsers.has(String(user || '').replace(/^@/, '').toLowerCase());
+
+// Nombre para leer en voz alta: sin @, sin símbolos, máx. 16 caracteres; si no pasa el filtro, "alguien"
+function spokenName(user) {
+  if (isBlockedUser(user)) return 'alguien';
+  const clean = cleanText(String(user || '').replace(/[._]+/g, ' '), NAME_FILTER.maxSpokenLength || 16).replace('…', '');
+  if (!clean || isNameOffensive(user)) return 'alguien';
+  return clean;
+}
+
+// Pantalla de "Clic para activar el sonido" (solo si el audio arrancó suspendido)
+function drawAudioUnlock() {
+  if (!state.audioLocked) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  drawOutlinedText('🔊 Clic para activar el sonido', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, `900 64px ${HUD_FONT}`, '#ffffff', 10);
+  ctx.restore();
 }
 
 // ---------- Partículas (solo visual, se actualizan a 60 FPS) ----------
@@ -3106,6 +3856,7 @@ function render(now) {
   drawAnnouncements(now);
   drawThemeBanner(now);
   if (state.debug) drawDebug();
+  drawAudioUnlock();
 }
 
 // ---------- Loop principal ----------
@@ -3131,6 +3882,12 @@ function frame(now) {
       updateRoundStatus(now);
     } else if (now - state.deathAt >= RESTART_DELAY_MS) {
       resetGame(now);
+    } else {
+      const number = Math.max(1, Math.ceil((RESTART_DELAY_MS - (now - state.deathAt)) / 1000));
+      if (number !== state.lastCountdownNumber) {
+        state.lastCountdownNumber = number;
+        playSound('countBeep');
+      }
     }
 
     processEffectQueue(now, dt);
@@ -3182,12 +3939,17 @@ window.game = {
   state, resetGame, tick, setTheme, onChatCommand, msUntilThemeRotation, spawnItem,
   handleTikTokEvent, registerTeam, getTeamCounts, triggerVictoryDance, checkVictoryInminent, loadGiftMapping,
   get GIFT_MAPPING() { return GIFT_MAPPING; },
+  playSound, say, setAudioSettings, spokenName, displayHandle, isNameOffensive, audio,
   THEMES, FLAG_RENDERERS, ITEM_TYPES, AI_CONFIG, DANCE_PATTERNS,
 };
 
+loadBlockedUsers();
+buildBannedMatchers();
+initAudio();
 resetGame();
 requestAnimationFrame(frame);
 loadSettings();
+loadNameFilter();
 loadGiftMapping();
 connectToBridge();
 setInterval(reportGameStatus, GAME_STATUS_INTERVAL_MS);

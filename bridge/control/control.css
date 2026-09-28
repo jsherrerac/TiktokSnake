@@ -107,3 +107,5 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 #events li { padding: 2px 0; border-bottom: 1px solid var(--line); }
 #events .src { color: var(--muted); }
+
+input[type="range"] { width: 120px; padding: 0; }

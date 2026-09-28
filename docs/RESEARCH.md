@@ -114,7 +114,7 @@ Investigación con límite de tiempo (~30 min, ~25 fuentes). Cada afirmación ll
 - **Importante:** Chrome ignora los flags si ya hay otro Chrome abierto con el mismo perfil → `start-stream.bat` usa su propio `--user-data-dir`.
 
 ### Voces TTS en español
-- **CONFIRMADO (probado aquí).** En este PC Chrome ofrece solo **"Google español" (es-ES)** y **"Google español de Estados Unidos" (es-US)**, las dos por internet. No hay voces de Windows en español instaladas.
+- **CONFIRMADO (probado aquí).** En este PC Chrome ofrece **"Google español" (es-ES)** y **"Google español de Estados Unidos" (es-US)** (por internet) y además la voz local de Windows **"Microsoft Raul - Spanish (Mexico)" (es-MX)**. En la primera consulta solo aparecieron las de Google porque la lista de voces se carga por partes (`onvoiceschanged`); el juego la vuelve a pedir cuando cambia.
 - **PROBABLE.** Se pueden instalar voces locales de Windows en español (por ejemplo, de México) desde *Configuración > Hora e idioma > Voz*; aparecerían como "Microsoft …" en `speechSynthesis.getVoices()`. Las voces locales no dependen de internet.
 - **Cambio en el proyecto:** preferir es-CO, luego es-MX, luego es-US y luego cualquier voz es-*, configurable.
 
